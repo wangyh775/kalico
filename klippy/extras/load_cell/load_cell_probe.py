@@ -709,8 +709,10 @@ class LoadCellPrimitives:
     def probing_move(
         self, mcu_probe, pos, speed, gcmd
     ) -> tuple[list[float], LoadCellSampleCollector]:
+        logging.info("PROBING_MOVE_ENTRY: about to tare")
         # tare the sensor just before probing
         self.tare(gcmd)
+        logging.info("PROBING_MOVE_ENTRY: tare done, starting collector")
         # start collector after tare samples are consumed
         collector = self._start_collector()
         # do homing move
