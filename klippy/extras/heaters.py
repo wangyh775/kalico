@@ -680,6 +680,12 @@ class Heater:
                 temp_profile["tolerance"] = config_section.getfloat(
                     "tolerance", above=0.0, default=1e-6
                 )
+                temp_profile["ekf_Q_scale"] = config_section.getfloat(
+                    "ekf_Q_scale", above=0.0, maxval=10.0, default=0.1
+                )
+                temp_profile["ekf_R_scale"] = config_section.getfloat(
+                    "ekf_R_scale", above=0.0, maxval=10.0, default=0.25
+                )
             elif control == "pid" or control == "pid_v":
                 for key, (type, placeholder) in PID_PROFILE_OPTIONS.items():
                     can_be_none = (
