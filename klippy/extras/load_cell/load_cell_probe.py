@@ -643,33 +643,33 @@ class LoadCellPrimitives:
         tare_counts = int(
             np.average(np.array(tare_samples)[:, 2].astype(float))
         )
-        # Debug: log tare values
-        sample_counts = [s[2] for s in tare_samples]
-        logging.info(
-            "Tare DEBUG: tare_counts=%d num_samples=%d "
-            "sample_min=%d sample_max=%d sample_range=%d "
-            "reference_tare=%d counts_per_gram=%.2f",
-            tare_counts, len(tare_samples),
-            min(sample_counts), max(sample_counts),
-            max(sample_counts) - min(sample_counts),
-            self._load_cell.get_reference_tare_counts(),
-            self._load_cell.get_counts_per_gram() or 0,
-        )
+        # # Debug: log tare values
+        # sample_counts = [s[2] for s in tare_samples]
+        # logging.info(
+        #     "Tare DEBUG: tare_counts=%d num_samples=%d "
+        #     "sample_min=%d sample_max=%d sample_range=%d "
+        #     "reference_tare=%d counts_per_gram=%.2f",
+        #     tare_counts, len(tare_samples),
+        #     min(sample_counts), max(sample_counts),
+        #     max(sample_counts) - min(sample_counts),
+        #     self._load_cell.get_reference_tare_counts(),
+        #     self._load_cell.get_counts_per_gram() or 0,
+        # )
         self._config_helper.assert_force_safety_limit(tare_counts, gcmd)
         # update sos_filter with any gcode parameter changes
         self._continuous_tare_filter_helper.update_from_command(gcmd)
         self._mcu_load_cell_probe.set_endstop_range(tare_counts, gcmd)
-        # Debug: log endstop range
-        trigger_force = self._config_helper.get_trigger_force_grams(gcmd)
-        counts_per_gram = self._load_cell.get_counts_per_gram()
-        logging.info(
-            "Tare DEBUG: trigger_force=%dg counts_per_gram=%.2f "
-            "tare_counts=%d trigger_counts_delta=%d",
-            trigger_force,
-            counts_per_gram or 0,
-            tare_counts,
-            int(trigger_force * (counts_per_gram or 1)),
-        )
+        # # Debug: log endstop range
+        # trigger_force = self._config_helper.get_trigger_force_grams(gcmd)
+        # counts_per_gram = self._load_cell.get_counts_per_gram()
+        # logging.info(
+        #     "Tare DEBUG: trigger_force=%dg counts_per_gram=%.2f "
+        #     "tare_counts=%d trigger_counts_delta=%d",
+        #     trigger_force,
+        #     counts_per_gram or 0,
+        #     tare_counts,
+        #     int(trigger_force * (counts_per_gram or 1)),
+        # )
 
     def home_start(self, print_time):
         # do not permit homing if the load cell is not calibrated
@@ -709,10 +709,10 @@ class LoadCellPrimitives:
     def probing_move(
         self, mcu_probe, pos, speed, gcmd
     ) -> tuple[list[float], LoadCellSampleCollector]:
-        logging.info("PROBING_MOVE_ENTRY: about to tare")
+        # logging.info("PROBING_MOVE_ENTRY: about to tare")
         # tare the sensor just before probing
         self.tare(gcmd)
-        logging.info("PROBING_MOVE_ENTRY: tare done, starting collector")
+        # logging.info("PROBING_MOVE_ENTRY: tare done, starting collector")
         # start collector after tare samples are consumed
         collector = self._start_collector()
         # do homing move
