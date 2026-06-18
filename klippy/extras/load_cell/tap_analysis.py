@@ -344,6 +344,25 @@ class ForceGraph:
             # log for user debugging
             logging.info("TapAnalysis: curve optimization not used")
 
+        # Debug: log line slopes and key indices
+        logging.info(
+            "TapAnalysis DEBUG tap_decompose: "
+            "homing_start=%d contact_elbow=%d dwell_start=%d "
+            "pullback_start=%d pullback_cruise=%d break_contact=%d "
+            "pullback_end=%d",
+            homing_start_idx, contact_elbow_idx, dwell_start_idx,
+            pullback_start_idx, pullback_cruise_idx, break_contact_idx,
+            pullback_end_idx,
+        )
+        logging.info(
+            "TapAnalysis DEBUG lines: "
+            "l1(slope=%.4f,int=%.4f) l2(slope=%.4f,int=%.4f) "
+            "l3(slope=%.4f,int=%.4f) l4(slope=%.4f,int=%.4f) "
+            "l5(slope=%.4f,int=%.4f)",
+            l1.slope, l1.intercept, l2.slope, l2.intercept,
+            l3.slope, l3.intercept, l4.slope, l4.intercept,
+            l5.slope, l5.intercept,
+        )
         return [l1, l2, l3, l4, l5], homing_start_idx, pullback_end_idx
 
 
@@ -502,6 +521,16 @@ class TapAnalysis:
     # validate that a set of ForcePoint objects are in chronological order
     def _validate_order(self):
         p = self._tap_points
+        times = [p[i].time for i in range(6)]
+        # Debug: log detailed order check
+        for i in range(5):
+            if times[i] >= times[i + 1]:
+                logging.info(
+                    "TapAnalysis DEBUG ORDER FAIL: p%d(%.6f) >= p%d(%.6f) "
+                    "delta=%.6f",
+                    i, times[i], i + 1, times[i + 1],
+                    times[i] - times[i + 1],
+                )
         if not (
             p[0].time
             < p[1].time
@@ -566,6 +595,22 @@ class TapAnalysis:
             l5.find_force(float(self._time[self._pullback_end_index])),
         )
         self._tap_points = [p0, p1, p2, p3, p4, p5]
+        # Debug: log all 6 force points
+        logging.info(
+            "TapAnalysis DEBUG points: "
+            "p0(t=%.6f,f=%.2f) p1(t=%.6f,f=%.2f) p2(t=%.6f,f=%.2f) "
+            "p3(t=%.6f,f=%.2f) p4(t=%.6f,f=%.2f) p5(t=%.6f,f=%.2f)",
+            p0.time, p0.force, p1.time, p1.force, p2.time, p2.force,
+            p3.time, p3.force, p4.time, p4.force, p5.time, p5.force,
+        )
+        # Check for degenerate intersections
+        for i, p in enumerate(self._tap_points):
+            if p.time < 0 or p.time > self._time[-1] * 2:
+                logging.info(
+                    "TapAnalysis DEBUG WARNING: p%d time=%.6f is outside "
+                    "expected range [0, %.6f]",
+                    i, p.time, self._time[-1],
+                )
 
     def _calculate_angles(self):
         l1, l2, l3, l4, l5 = self._tap_lines
