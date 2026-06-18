@@ -10,6 +10,8 @@ When debugging code that runs on the remote Klipper host, you MUST follow this w
 4. **Pull on printer** — `cd /home/klipper/klipper && git fetch kalico <branch> && git checkout <branch>`
 5. **Restart Klipper** — Via Moonraker API: `curl -X POST http://10.42.110.102/printer/firmware_restart`
 
+**Branch lifecycle**: 调试分支基于 `dev` 创建，完成后合并到 `test` 分支，然后删除远程调试分支。打印机运行 `test` 分支。
+
 ## Config Changes
 
 - Config files (printer.cfg, RP2040.cfg, etc.) can be edited directly via Moonraker file API
