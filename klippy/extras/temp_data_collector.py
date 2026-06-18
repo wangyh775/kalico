@@ -61,6 +61,9 @@ PIN_MIN_TIME = 0.100
 # 默认环境温度（摄氏度），用于热损耗计算
 AMBIENT_TEMP = 25.0
 
+# 稳态确认后开始挤出前的等待时间（秒）
+STABILITY_BEFORE_EXTRUDE = 15.0
+
 
 # =============================================================================
 # 核心类：温度数据采集器
@@ -634,6 +637,7 @@ class TemperatureDataCollector:
                                    [COOLING_MODE=<duration|target_temp>]
                                    [COOLING_DURATION=<秒>]
                                    [COOLING_TARGET_TEMP=<温度>]
+                                   [F=<挤出速度>] [EXTRUDE_DURATION=<挤出时长>]
 
         参数：
             HEATER: 加热器名称，默认 "extruder"
@@ -645,11 +649,14 @@ class TemperatureDataCollector:
             COOLING_MODE: 冷却模式，"duration"（固定时长）或 "target_temp"（目标温度），默认 "target_temp"
             COOLING_DURATION: 冷却持续时间（秒），当 COOLING_MODE=duration 时有效，默认 600
             COOLING_TARGET_TEMP: 冷却目标温度 (°C)，当 COOLING_MODE=target_temp 时有效，默认 30
+            F: 挤出速度 (mm/min)，默认 0（不挤出），设置大于0则启用挤出
+            EXTRUDE_DURATION: 挤出持续时间 (秒)，默认 0（挤出到稳态采集结束）
 
         示例：
             STEADY_STATE_CALIBRATE HEATER=extruder TEMP_POINTS=50,100,150,200,250,300
             STEADY_STATE_CALIBRATE HEATER=extruder COOLING_MODE=duration COOLING_DURATION=300
             STEADY_STATE_CALIBRATE HEATER=extruder COOLING_ENABLED=0
+            STEADY_STATE_CALIBRATE HEATER=extruder F=300 EXTRUDE_DURATION=60
         """
         heater_name = gcmd.get("HEATER", "extruder")
         temp_points = gcmd.get("TEMP_POINTS", "50,100,150,200,250,300")
@@ -665,6 +672,9 @@ class TemperatureDataCollector:
         cooling_target_temp = gcmd.get_float(
             "COOLING_TARGET_TEMP", 30.0, above=0.0
         )
+
+        extrude_speed = gcmd.get_float("F", 0.0, minval=0.0)
+        extrude_duration = gcmd.get_float("EXTRUDE_DURATION", 0.0, minval=0.0)
 
         try:
             self.heater = self._get_heater(heater_name)
@@ -685,7 +695,14 @@ class TemperatureDataCollector:
             f"温度设定点: {temps}\n"
             f"稳定性容差: {stability_tolerance}°C\n"
             f"稳定持续时间: {stability_duration}s\n"
-            f"冷却数据采集: {'启用' if cooling_enabled else '禁用'}"
+            f"冷却数据采集: {'启用' if cooling_enabled else '禁用'}\n"
+            f"挤出: {'启用' if extrude_speed > 0 else '禁用'}"
+            + (
+                f" (速度: {extrude_speed:.0f}mm/min, "
+                f"时长: {'至采集结束' if extrude_duration <= 0 else f'{extrude_duration:.0f}s'})"
+                if extrude_speed > 0
+                else ""
+            )
         )
 
         if cooling_enabled:
@@ -709,6 +726,8 @@ class TemperatureDataCollector:
                     stability_duration,
                     gcmd,
                     tolerance=stability_tolerance,
+                    extrude_speed=extrude_speed,
+                    extrude_duration=extrude_duration,
                 )
 
                 results.append(
@@ -749,7 +768,13 @@ class TemperatureDataCollector:
         gcmd.respond_info(summary)
 
     def _run_steady_state_measurement(
-        self, target_temp, stable_duration, gcmd, tolerance=1.0
+        self,
+        target_temp,
+        stable_duration,
+        gcmd,
+        tolerance=1.0,
+        extrude_speed=0.0,
+        extrude_duration=0.0,
     ):
         """
         执行单温度点稳态测量
@@ -766,6 +791,8 @@ class TemperatureDataCollector:
             tolerance: 温度波动容差 (°C)，默认值为 1.0
                       - None: 固定时长模式，不进行稳定性监测
                       - 数值: 稳定性监测模式，温度波动 ≤ tolerance 时认为稳定
+            extrude_speed: 挤出速度 (mm/min)，0表示不挤出
+            extrude_duration: 挤出持续时间 (秒)，0表示挤出到稳态采集结束
 
         返回：
             dict: 稳态测量结果，包含：
@@ -789,7 +816,9 @@ class TemperatureDataCollector:
                 f"等待 {target_temp}°C 温度稳定 (容差: {tolerance}°C)..."
             )
 
+            stability_window = 5
             stable_start = None
+            stable_confirmed_time = None
             check_interval = 1.0
             last_temps = []
 
@@ -797,7 +826,7 @@ class TemperatureDataCollector:
                 current_temp = self._get_sensor_temp()
 
                 last_temps.append(current_temp)
-                if len(last_temps) > int(stable_duration / check_interval):
+                if len(last_temps) > int(stability_window / check_interval):
                     last_temps.pop(0)
 
                 if len(last_temps) >= 3:
@@ -805,27 +834,31 @@ class TemperatureDataCollector:
                     if temp_range <= tolerance:
                         if stable_start is None:
                             stable_start = self.reactor.monotonic()
+                            stable_confirmed_time = self.reactor.monotonic()
                         elif (
                             self.reactor.monotonic() - stable_start
-                        ) >= stable_duration:
+                        ) >= stability_window:
                             gcmd.respond_info(
                                 f"温度 {target_temp}°C 已达到稳定状态"
                             )
                             break
                     else:
                         stable_start = None
+                        stable_confirmed_time = None
 
                 self.reactor.pause(self.reactor.monotonic() + check_interval)
         else:
             gcmd.respond_info(
                 f"已达到目标温度，开始稳态数据采集 ({stable_duration}秒)"
             )
+            stable_confirmed_time = None
 
         samples_at_start = len(self.data_buffer)
         measurement_start = self.reactor.monotonic()
         check_interval = 1.0
         last_report_time = measurement_start
         report_interval = 15.0
+        extrusion_started = False
 
         while True:
             current_time = self.reactor.monotonic()
@@ -833,6 +866,46 @@ class TemperatureDataCollector:
 
             if elapsed >= stable_duration:
                 break
+
+            time_since_stable = (
+                current_time - stable_confirmed_time
+                if stable_confirmed_time is not None
+                else 0.0
+            )
+            if (
+                not extrusion_started
+                and extrude_speed > 0
+                and time_since_stable >= STABILITY_BEFORE_EXTRUDE
+            ):
+                extrude_time = (
+                    stable_duration
+                    - STABILITY_BEFORE_EXTRUDE
+                    - (measurement_start - stable_confirmed_time)
+                    if extrude_duration <= 0
+                    else min(
+                        extrude_duration,
+                        stable_duration
+                        - STABILITY_BEFORE_EXTRUDE
+                        - (measurement_start - stable_confirmed_time),
+                    )
+                )
+                distance = extrude_speed * extrude_time / 60.0
+                try:
+                    gcode_move = self.printer.lookup_object("gcode_move")
+                    was_absolute = gcode_move.absolute_extrude
+                    self.gcode.run_script_from_command("M83")
+                    self.gcode.run_script_from_command(
+                        f"G1 E{distance:.1f} F{extrude_speed:.0f}"
+                    )
+                    if was_absolute:
+                        self.gcode.run_script_from_command("M82")
+                    extrusion_started = True
+                    gcmd.respond_info(
+                        f"开始挤出: 速度{extrude_speed:.0f}mm/min, "
+                        f"距离{distance:.1f}mm, 时长{extrude_time:.0f}s"
+                    )
+                except Exception as e:
+                    gcmd.respond_info(f"挤出启动失败: {e}")
 
             if current_time - last_report_time >= report_interval:
                 current_temp = self._get_sensor_temp()

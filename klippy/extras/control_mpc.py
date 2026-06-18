@@ -523,6 +523,231 @@ def _ekf_step(
 
 
 @jit(nopython=True, cache=True, fastmath=True)
+def _compute_jacobian_list(
+    T_h_init,
+    T_b_init,
+    T_s_init,
+    u,
+    dt,
+    T_env,
+    T_cold,
+    v_f,
+    T_filament,
+    theta_1,
+    theta_2,
+    theta_3,
+    theta_4,
+    theta_5,
+    theta_6,
+    theta_7,
+    theta_8,
+    theta_9,
+    c_p,
+    Np,
+):
+    F_list = np.zeros((Np, 3, 3))
+    T_h = T_h_init
+    T_b = T_b_init
+    T_s = T_s_init
+    for k in range(Np):
+        F = _ekf_model_jacobian(
+            T_h,
+            T_b,
+            T_s,
+            u[min(k, len(u) - 1)],
+            dt,
+            T_env,
+            T_cold,
+            v_f,
+            T_filament,
+            theta_1,
+            theta_2,
+            theta_3,
+            theta_4,
+            theta_5,
+            theta_6,
+            theta_7,
+            theta_8,
+            theta_9,
+            c_p,
+        )
+        F_list[k] = F
+        T_h, T_b, T_s = _numba_model_step(
+            T_h,
+            T_b,
+            T_s,
+            u[min(k, len(u) - 1)],
+            dt,
+            T_env,
+            T_cold,
+            v_f,
+            T_filament,
+            theta_1,
+            theta_2,
+            theta_3,
+            theta_4,
+            theta_5,
+            theta_6,
+            theta_7,
+            theta_8,
+            theta_9,
+            c_p,
+        )
+    return F_list
+
+
+@jit(nopython=True, cache=True, fastmath=True)
+def _adjoint_backward_pass(T_s_pred, setpoint, F_list, Np, w_t, w_terminal):
+    lambda_list = np.zeros((Np + 1, 3))
+    error_Np = T_s_pred[Np] - setpoint
+    lambda_list[Np, 2] = 2.0 * (w_t + w_terminal) * error_Np
+    for k in range(Np - 1, -1, -1):
+        F_k = F_list[k]
+        lambda_next = np.array(
+            [
+                lambda_list[k + 1, 0],
+                lambda_list[k + 1, 1],
+                lambda_list[k + 1, 2],
+            ]
+        )
+        dJ_dx = np.zeros(3)
+        error = T_s_pred[k + 1] - setpoint
+        dJ_dx[2] = 2.0 * w_t * error
+        lambda_curr = np.array(
+            [
+                F_k[0, 0] * lambda_next[0]
+                + F_k[1, 0] * lambda_next[1]
+                + F_k[2, 0] * lambda_next[2]
+                + dJ_dx[0],
+                F_k[0, 1] * lambda_next[0]
+                + F_k[1, 1] * lambda_next[1]
+                + F_k[2, 1] * lambda_next[2]
+                + dJ_dx[1],
+                F_k[0, 2] * lambda_next[0]
+                + F_k[1, 2] * lambda_next[1]
+                + F_k[2, 2] * lambda_next[2]
+                + dJ_dx[2],
+            ]
+        )
+        lambda_list[k] = lambda_curr
+    return lambda_list
+
+
+@jit(nopython=True, cache=True, fastmath=True)
+def _compute_gradient_adjoint(
+    T_h,
+    T_b,
+    T_s,
+    u,
+    setpoint,
+    dt,
+    T_env,
+    T_cold,
+    v_f,
+    T_filament,
+    theta_1,
+    theta_2,
+    theta_3,
+    theta_4,
+    theta_5,
+    theta_6,
+    theta_7,
+    theta_8,
+    theta_9,
+    c_p,
+    Np,
+    Nc,
+    w_t,
+    w_terminal,
+    w_r,
+    last_control,
+):
+    T_h_pred = np.zeros(Np + 1)
+    T_b_pred = np.zeros(Np + 1)
+    T_s_pred = np.zeros(Np + 1)
+    T_h_pred[0] = T_h
+    T_b_pred[0] = T_b
+    T_s_pred[0] = T_s
+    for k in range(Np):
+        T_h, T_b, T_s = _numba_model_step(
+            T_h,
+            T_b,
+            T_s,
+            u[min(k, len(u) - 1)],
+            dt,
+            T_env,
+            T_cold,
+            v_f,
+            T_filament,
+            theta_1,
+            theta_2,
+            theta_3,
+            theta_4,
+            theta_5,
+            theta_6,
+            theta_7,
+            theta_8,
+            theta_9,
+            c_p,
+        )
+        T_h_pred[k + 1] = T_h
+        T_b_pred[k + 1] = T_b
+        T_s_pred[k + 1] = T_s
+    F_list = _compute_jacobian_list(
+        T_h_pred[0],
+        T_b_pred[0],
+        T_s_pred[0],
+        u,
+        dt,
+        T_env,
+        T_cold,
+        v_f,
+        T_filament,
+        theta_1,
+        theta_2,
+        theta_3,
+        theta_4,
+        theta_5,
+        theta_6,
+        theta_7,
+        theta_8,
+        theta_9,
+        c_p,
+        Np,
+    )
+    lambda_list = _adjoint_backward_pass(
+        T_s_pred, setpoint, F_list, Np, w_t, w_terminal
+    )
+    grad = np.zeros(Nc)
+    for j in range(Nc):
+        dT_s_dP = np.zeros(Np + 1)
+        dT_s_dP[0] = 0.0
+        dT_h = 0.0
+        dT_b = 0.0
+        dT_s = 0.0
+        for k in range(Np):
+            dT_h_new = (
+                theta_1 * dt * (dT_b - dT_h)
+                + (1.0 - theta_1 * dt) * dT_h
+                + dt * theta_1
+            )
+            dT_b_new = (
+                theta_2 * dt * dT_h
+                + (1.0 - (theta_3 + theta_5 + theta_6) * dt) * dT_b
+                - theta_3 * dt * dT_s
+            )
+            dT_s_new = theta_4 * dt * dT_b + (1.0 - theta_4 * dt) * dT_s
+            if k >= j:
+                dT_h_new += dt * theta_1
+            dT_s_dP[k + 1] = dT_s_new
+            dT_h = dT_h_new
+            dT_b = dT_b_new
+            dT_s = dT_s_new
+        grad[j] = np.sum(lambda_list[:, 2] * dT_s_dP)
+    return grad
+
+
+@jit(nopython=True, cache=True, fastmath=True)
 def _compute_gradient(
     T_h,
     T_b,
@@ -551,28 +776,11 @@ def _compute_gradient(
     w_r,
     last_control,
 ):
-    """
-    计算MPC目标函数关于控制序列的梯度
-
-    使用有限差分法近似梯度
-
-    参数:
-        T_h, T_b, T_s: 初始状态
-        u: 控制序列 (长度Nc)
-        setpoint: 目标温度
-        其他参数: 模型和MPC参数
-
-    返回:
-        grad: 梯度向量 (长度Nc)
-    """
-    grad = np.zeros(Nc)
-    eps = 1e-4
-
-    J0 = _numba_mpc_objective(
-        u,
+    return _compute_gradient_adjoint(
         T_h,
         T_b,
         T_s,
+        u,
         setpoint,
         dt,
         T_env,
@@ -596,43 +804,6 @@ def _compute_gradient(
         w_r,
         last_control,
     )
-
-    for i in range(Nc):
-        u_plus = u.copy()
-        u_plus[i] += eps
-
-        J_plus = _numba_mpc_objective(
-            u_plus,
-            T_h,
-            T_b,
-            T_s,
-            setpoint,
-            dt,
-            T_env,
-            T_cold,
-            v_f,
-            T_filament,
-            theta_1,
-            theta_2,
-            theta_3,
-            theta_4,
-            theta_5,
-            theta_6,
-            theta_7,
-            theta_8,
-            theta_9,
-            c_p,
-            Np,
-            Nc,
-            w_t,
-            w_terminal,
-            w_r,
-            last_control,
-        )
-
-        grad[i] = (J_plus - J0) / eps
-
-    return grad
 
 
 @jit(nopython=True, cache=True, fastmath=True)
@@ -2073,6 +2244,9 @@ class ControlMPCV2:
         self.pgd_iterations_v2 = 0  # PGD迭代次数
         self.pgd_converged_v2 = False  # PGD收敛标志
 
+        if self.numba_enabled_v2:
+            self._warmup_numba()
+
         if not register:
             return
 
@@ -2272,6 +2446,35 @@ class ControlMPCV2:
             / 1000.0  # mm^3 => cm^3
             * self.const_filament_density_v2  # g/cm^3
             * self.const_filament_heat_capacity_v2  # J/g/K
+        )
+
+    def _warmup_numba(self):
+        """
+        Numba 预热 - 触发 JIT 编译以避免首次调用的延迟
+
+        在控制器初始化时调用，确保所有 Numba 加速函数已编译完成，
+        避免在首次控制循环时因 JIT 编译导致控制延迟。
+        """
+        _numba_model_step(
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.1,
+            25.0,
+            25.0,
+            0.0,
+            25.0,
+            5.029312e-02,
+            2.806417e-01,
+            1.065468e-02,
+            1.370236e-01,
+            3.195262e-03,
+            2.327857e-02,
+            2.571527e-11,
+            8.000314e-02,
+            4.458e-01,
+            0.00259,
         )
 
     def is_valid_v2(self):
