@@ -34,6 +34,7 @@ plugins:
   mkdocs-simple-hooks:
     hooks:
       on_page_markdown: "mkdocs_hooks:transform"
+      on_config: "mkdocs_hooks:on_config"
   gh-admonitions:
   redirects:
     redirect_maps:
@@ -181,3 +182,5 @@ nav:
     - mydocs/串口压力传感器.md
     - mydocs/温度数据采集模块.md
     - mydocs/ExtrusionPressureControl.md
+    - mydocs/Load_Cell.md
+    - mydocs/巴特沃斯滤波器.md

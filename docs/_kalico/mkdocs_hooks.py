@@ -1,6 +1,28 @@
 # Tool to customize conversion of markdown files during mkdocs site generation
 import re
 import logging
+import sys
+import os
+
+# Ensure this module is importable for YAML !!python/name: tags
+_dir = os.path.dirname(os.path.abspath(__file__))
+if _dir not in sys.path:
+    sys.path.insert(0, _dir)
+
+from pymdownx.slugs import slugify as _pymdownx_slugify
+
+# CJK-aware slugify that also strips leading/trailing hyphens
+# (e.g. from emoji ⚠️ headings being stripped, leaving "-name")
+_slugify_fn = _pymdownx_slugify(case="lower")
+
+
+def custom_slugify(text, sep):
+    return _slugify_fn(text, sep).strip("-")
+
+
+def on_config(config, **kwargs):
+    """Inject CJK-aware slugify into the toc extension."""
+    config["mdx_configs"]["toc"]["slugify"] = custom_slugify
 
 # This script translates some github specific markdown formatting to
 # improve rendering with mkdocs.  The goal is for pages to render
