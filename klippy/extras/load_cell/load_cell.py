@@ -446,6 +446,7 @@ class LoadCell:
         self.sensor = sensor
         buffer_size = sensor.get_samples_per_second() // 2
         self._force_buffer = collections.deque(maxlen=buffer_size)
+        self._counts_buffer = collections.deque(maxlen=buffer_size)
         self.reference_tare_counts = config.getint(
             "reference_tare_counts", default=None
         )
@@ -601,6 +602,9 @@ class LoadCell:
 
     # Provide ongoing force tracking/averaging for status updates
     def _track_force(self, msg):
+        samples = msg["data"]
+        for sample in samples:
+            self._counts_buffer.append(sample[2])
         if not (self.is_calibrated() and self.is_tared()):
             return True
         samples = msg["data"]
@@ -648,6 +652,14 @@ class LoadCell:
 
     def get_status(self, eventtime):
         status = self._force_g()
+        if len(self._counts_buffer) > 0:
+            status.update(
+                {
+                    "counts": int(round(avg(self._counts_buffer))),
+                    "min_counts": min(self._counts_buffer),
+                    "max_counts": max(self._counts_buffer),
+                }
+            )
         status.update(
             {
                 "is_calibrated": self.is_calibrated(),
