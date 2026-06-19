@@ -116,6 +116,10 @@ class VirtualMCU:
         """简单的 32 位到 64 位转换"""
         return clock32 & 0xFFFFFFFF
 
+    def estimated_print_time(self, eventtime: float) -> float:
+        """USB 串口传感器的虚拟打印时间（直接返回单调时间）"""
+        return eventtime
+
 
 class ALPSSerialSensor(LoadCellSensor):
     def __init__(self, config):
