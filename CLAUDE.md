@@ -39,7 +39,7 @@ Kalico 是 Klipper 3D 打印机固件的社区维护分支。它在主线 Klippe
 
 ### 主机端（Python）— `klippy/`
 - 入口：`python -m klippy` → `klippy/printer.py` → `Printer.main()`
-- `klippy/extras/`：自动加载模块。配置节 `[my_module]` 映射到 `klippy/extras/my_module.py` 中的 `load_config(config)`。命名节使用 `load_load_config_prefix(config)`。
+- `klippy/extras/`：自动加载模块。配置节 `[my_module]` 映射到 `klippy/extras/my_module.py` 中的 `load_config(config)`。命名节使用 `load_config_prefix(config)`。
 - `klippy/plugins/`：用户插件，启动时扫描。仅当 `danger_options.allow_plugin_override` 启用时才覆盖 `extras`。
 - 模块生命周期、事件钩子、对象查找：参见 `docs/Code_Overview.md`
 
@@ -56,7 +56,7 @@ Kalico 是 Klipper 3D 打印机固件的社区维护分支。它在主线 Klippe
 
 ## 远程打印机调试（强制要求）
 
-调试远程 Klipper 主机上的代码时，**绝不能直接修改主机代码**。必须遵循以下工作流：
+调试远程 Klipper 主机上的代码时，**绝不能直接修改远程主机代码**。必须遵循以下工作流：
 
 1. **本地编辑** — 在本地工作树中修改
 2. **提交并推送** — 将分支推送到远程 Git 仓库
@@ -64,7 +64,7 @@ Kalico 是 Klipper 3D 打印机固件的社区维护分支。它在主线 Klippe
 4. **打印机拉取** — `cd /home/klipper/klipper && git fetch kalico <branch> && git checkout <branch>`
 5. **重启 Klipper** — `curl -X POST http://10.42.110.102/printer/firmware_restart`
 
-**分支生命周期**：调试分支基于 `dev` 创建，完成后合并到 `test` 分支，然后删除远程调试分支。打印机运行 `test` 分支。
+**分支生命周期**：调试分支基于最新的 `test` 远程分支创建工作树，创建工作树前应先更新本地`test`分支，开发完成后经用户允许创建PR合并到 `test`。打印机运行 `test` 分支。
 
 ### 配置修改
 - 配置文件可通过 Moonraker API 直接上传：`POST /server/files/upload`
