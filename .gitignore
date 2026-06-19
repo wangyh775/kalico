@@ -15,6 +15,7 @@ klippy/plugins/*
 !klippy/plugins/__init__.py
 .vscode
 .idea/*
+.codegraph/
 
 # docs
 site/
