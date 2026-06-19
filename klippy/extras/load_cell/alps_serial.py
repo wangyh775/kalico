@@ -307,7 +307,7 @@ class ALPSSerialSensor(LoadCellSensor):
             eventtime = time.monotonic()
 
             # 将数据放入队列（只存储时间戳和原始值，2 元素元组）
-            raw_value = int(b_value * 1000)
+            raw_value = int(b_value)
             try:
                 self.data_queue.put_nowait((eventtime, raw_value))
             except queue.Full:
