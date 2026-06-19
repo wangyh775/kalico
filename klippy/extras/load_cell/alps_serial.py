@@ -178,6 +178,7 @@ class ALPSSerialSensor(LoadCellSensor):
         """Klipper 就绪时开始读取"""
         try:
             self._open_serial()
+            self._send_activation()
             self._start_reading()
             logging.info(
                 "ALPS sensor '%s' started on port %s at fixed %d Hz",
@@ -191,6 +192,35 @@ class ALPSSerialSensor(LoadCellSensor):
             )
             raise self.printer.command_error(
                 f"ALPS sensor initialization failed: {str(e)}"
+            )
+
+    def _send_activation(self):
+        """发送激活命令使传感器开始输出数据"""
+        try:
+            self.serial_conn.write(b"rt\r\n")
+            time.sleep(0.3)
+            # 读取 rt 响应
+            if self.serial_conn.in_waiting > 0:
+                resp = self.serial_conn.read(self.serial_conn.in_waiting)
+                logging.info(
+                    "ALPS sensor '%s' rt response: %s",
+                    self.name,
+                    resp.decode("utf-8", errors="ignore").strip(),
+                )
+            self.serial_conn.write(b"v\r\n")
+            time.sleep(0.3)
+            # 读取 v 响应（数据流的前几行）
+            if self.serial_conn.in_waiting > 0:
+                resp = self.serial_conn.read(min(self.serial_conn.in_waiting, 200))
+                logging.info(
+                    "ALPS sensor '%s' v response (first bytes): %s",
+                    self.name,
+                    resp.decode("utf-8", errors="ignore").strip()[:100],
+                )
+            logging.info("ALPS sensor '%s' activation commands sent", self.name)
+        except Exception as e:
+            raise self.printer.command_error(
+                f"ALPS sensor activation failed: {str(e)}"
             )
 
     def _handle_shutdown(self):
