@@ -116,6 +116,10 @@ class VirtualMCU:
         """简单的 32 位到 64 位转换"""
         return clock32 & 0xFFFFFFFF
 
+    def estimated_print_time(self, eventtime: float) -> float:
+        """USB 串口传感器的虚拟打印时间（直接返回单调时间）"""
+        return eventtime
+
 
 class ALPSSerialSensor(LoadCellSensor):
     def __init__(self, config):
@@ -207,7 +211,9 @@ class ALPSSerialSensor(LoadCellSensor):
             time.sleep(0.3)
             # 读取 v 响应（数据流的前几行）
             if self.serial_conn.in_waiting > 0:
-                resp = self.serial_conn.read(min(self.serial_conn.in_waiting, 200))
+                resp = self.serial_conn.read(
+                    min(self.serial_conn.in_waiting, 200)
+                )
                 logging.info(
                     "ALPS sensor '%s' v response (first bytes): %s",
                     self.name,
@@ -337,7 +343,7 @@ class ALPSSerialSensor(LoadCellSensor):
             eventtime = time.monotonic()
 
             # 将数据放入队列（只存储时间戳和原始值，2 元素元组）
-            raw_value = int(b_value * 1000)
+            raw_value = int(b_value)
             try:
                 self.data_queue.put_nowait((eventtime, raw_value))
             except queue.Full:
