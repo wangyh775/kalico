@@ -1,138 +1,138 @@
 # AGENTS.md
 
-## Scope
-- Applies to the whole repository.
+## 适用范围
+- 适用于整个仓库。
 
-## What this repo is
-- Kalico is a community-maintained fork of Klipper. Treat upstream Klipper assumptions carefully; this repo adds behavior and modules beyond mainline Klipper (`README.md`, `docs/Kalico_Additions.md`).
-- The repo contains both host-side Python code and MCU firmware code. Many changes require checking both sides.
+## 项目简介
+- Kalico 是 Klipper 的社区维护分支。谨慎对待上游 Klipper 的假设；本仓库在主线 Klipper 之上添加了行为和模块（`README.md`、`docs/Kalico_Additions.md`）。
+- 仓库同时包含主机端 Python 代码和 MCU 固件代码。许多修改需要同时检查两端。
 
-## High-value directories
-- `klippy/`: host firmware runtime in Python.
-  - Entry point is `python -m klippy` / `klippy/klippy.py`, which dispatches to `klippy.printer.main()`.
-  - `klippy/extras/` contains auto-loaded host modules.
-  - `klippy/plugins/` is also scanned at startup; plugin names can override `extras` only when `danger_options.allow_plugin_override` is enabled in config (`klippy/printer.py`).
-- `src/`: MCU firmware C sources. Architecture-specific code lives under subdirs like `src/avr`, `src/stm32`, etc.
-- `test/`: pytest-based test suite plus custom `.test` regression collector for Klippy integration-style tests.
-- `test/configs/`: canonical MCU `.config` fixtures used for firmware compile coverage in CI.
-- `docs/`: user/dev docs. `docs/Code_Overview.md`, `docs/Debugging.md`, and `docs/CONTRIBUTING.md` are the main sources of truth for architecture and contribution expectations.
-- `docs/_kalico/`: MkDocs project for documentation site.
-- `scripts/`: build/test helpers, regression runners, CI container assets, debug tools.
+## 重要目录
+- `klippy/`：主机固件 Python 运行时。
+  - 入口为 `python -m klippy` / `klippy/klippy.py`，分发到 `klippy.printer.main()`。
+  - `klippy/extras/` 包含自动加载的主机模块。
+  - `klippy/plugins/` 在启动时也会被扫描；插件名可以覆盖 `extras`，但仅当配置中启用 `danger_options.allow_plugin_override` 时（`klippy/printer.py`）。
+- `src/`：MCU 固件 C 源码。架构特定代码位于子目录如 `src/avr`、`src/stm32` 等。
+- `test/`：基于 pytest 的测试套件加上自定义 `.test` 回归收集器用于 Klippy 集成测试。
+- `test/configs/`：CI 中用于固件编译覆盖的标准 MCU `.config` 配置文件。
+- `docs/`：用户/开发文档。`docs/Code_Overview.md`、`docs/Debugging.md` 和 `docs/CONTRIBUTING.md` 是架构和贡献期望的主要参考。
+- `docs/_kalico/`：文档站点的 MkDocs 项目。
+- `scripts/`：构建/测试辅助工具、回归运行器、CI 容器资源、调试工具。
 
-## Developer environment and core commands
-- Python baseline is `>=3.9` (`pyproject.toml`).
-- Install dev deps with uv, not ad-hoc pip, if you need the repo-managed environment:
+## 开发环境和核心命令
+- Python 基线版本为 `>=3.9`（`pyproject.toml`）。
+- 使用 uv 安装开发依赖，不要用 ad-hoc pip：
   - `uv sync --dev`
-- Ruff is the only configured formatter/linter in this repo:
+- Ruff 是本仓库唯一配置的格式化器/检查器：
   - `uv run ruff check .`
   - `uv run ruff format .`
-- Pre-commit runs Ruff with `--fix` and `ruff-format` and excludes `docs/`, `config/`, and `lib/` (`.pre-commit-config.yaml`).
+- Pre-commit 使用 `--fix` 和 `ruff-format` 运行 Ruff，排除 `docs/`、`config/` 和 `lib/`（`.pre-commit-config.yaml`）。
   - `uv run pre-commit run --all-files`
 
-## Test and verification workflow
-- Fast host-side pytest:
+## 测试和验证工作流
+- 快速主机端 pytest：
   - `uv run pytest`
-- CI runs pytest across Python 3.9 through 3.14 inside the Docker build image, usually with xdist (`.github/workflows/ci-build_test.yaml`).
-- The custom `.test` regression suite is collected by `test/klippy/conftest.py`. Those tests invoke `python -m klippy ...` and require MCU dictionary files via `--dictdir` / `DICTDIR`.
-- `test/conftest.py` eagerly builds/loads `klippy.chelper` via `klippy.chelper.get_ffi()`. If tests fail very early, suspect chelper/native build prerequisites first.
-- Useful focused test invocations:
-  - Single pytest file: `uv run pytest test/test_autosave.py`
-  - Single pytest test: `uv run pytest test/test_autosave.py::test_autosave_includes`
-  - Klippy `.test` regression subset (requires dictionaries): `uv run pytest test/klippy -k bed_mesh`
-- Full CI-style local verification is driven by the container:
+- CI 在 Docker 构建镜像中跨 Python 3.9 到 3.14 运行 pytest，通常使用 xdist（`.github/workflows/ci-build_test.yaml`）。
+- 自定义 `.test` 回归套件由 `test/klippy/conftest.py` 收集。这些测试调用 `python -m klippy ...` 并需要 MCU 字典文件（`--dictdir` / `DICTDIR`）。
+- `test/conftest.py` 会急切构建/加载 `klippy.chelper`（通过 `klippy.chelper.get_ffi()`）。如果测试非常早期失败，优先怀疑 chelper/原生构建前置条件。
+- 常用的聚焦测试调用：
+  - 单个 pytest 文件：`uv run pytest test/test_autosave.py`
+  - 单个 pytest 测试：`uv run pytest test/test_autosave.py::test_autosave_includes`
+  - Klippy `.test` 回归子集（需要字典）：`uv run pytest test/klippy -k bed_mesh`
+- 完整的 CI 风格本地验证由容器驱动：
   - `docker build -f scripts/Dockerfile-build -t dangerklippers/klipper-build:latest .`
-  - Then, for example: `docker run -v ${PWD}:/klipper dangerklippers/klipper-build:latest --python 3.12 py.test -n auto`
-- `scripts/ci-build.sh` is the executable source of truth for firmware+pytest CI behavior:
-  - It compiles every `test/configs/*.config`
-  - Copies generated `out/klipper.dict` files into `DICTDIR`
-  - Then runs `py.test`
+  - 然后，例如：`docker run -v ${PWD}:/klipper dangerklippers/klipper-build:latest --python 3.12 py.test -n auto`
+- `scripts/ci-build.sh` 是固件+pytest CI 行为的可执行参考：
+  - 编译所有 `test/configs/*.config`
+  - 将生成的 `out/klipper.dict` 文件复制到 `DICTDIR`
+  - 然后运行 `py.test`
 
-## Firmware build facts that are easy to miss
-- Top-level `Makefile` builds MCU firmware, not the host Python package.
-- Common firmware flow:
+## 固件构建注意事项
+- 顶层 `Makefile` 构建 MCU 固件，不是主机 Python 包。
+- 常用固件流程：
   - `make menuconfig`
   - `make`
-- Build artifacts go under `out/`. `docs/Code_Overview.md` notes final outputs like `out/klipper.bin` on ARM or `out/klipper.elf.hex` on AVR.
-- The build includes `src/extras/Makefile` automatically. Firmware extensions under `src/extras/<name>/` need both `Kconfig` and `Makefile` wiring to participate in build/menuconfig (`docs/Code_Overview.md`).
+- 构建产物位于 `out/`。`docs/Code_Overview.md` 记录了最终输出如 ARM 平台的 `out/klipper.bin` 或 AVR 平台的 `out/klipper.elf.hex`。
+- 构建会自动包含 `src/extras/Makefile`。`src/extras/<name>/` 下的固件扩展需要同时配置 `Kconfig` 和 `Makefile` 才能参与构建/menuconfig（`docs/Code_Overview.md`）。
 
-## Host module conventions
-- New host modules should usually be added under `klippy/extras/` and loaded through config sections.
-- Kalico auto-loads modules by section name:
-  - `[my_module]` -> `load_config(config)` in `klippy/extras/my_module.py`
-  - `[my_module name]` -> `load_config_prefix(config)`
-- This convention is real and widely used across `klippy/extras/`; follow existing modules instead of inventing alternate registration patterns.
-- `docs/Code_Overview.md` is the best local guide for module lifecycle, event hooks, and object lookup conventions. Read it before adding or restructuring extras.
+## 主机模块规范
+- 新主机模块通常应添加到 `klippy/extras/` 下，并通过配置节加载。
+- Kalico 按节名自动加载模块：
+  - `[my_module]` → `klippy/extras/my_module.py` 中的 `load_config(config)`
+  - `[my_module name]` → `load_config_prefix(config)`
+- 此规范在 `klippy/extras/` 中广泛使用；遵循现有模块而不是发明替代注册模式。
+- `docs/Code_Overview.md` 是模块生命周期、事件钩子和对象查找规范的最佳本地指南。在添加或重构 extras 之前请先阅读。
 
-## Testing notes
-- `test/conftest.py` creates a symlink from `test/klippy_testing_plugin.py` into `klippy/plugins/testing.py`. Do not break this plugin-loading path.
-- The `test/klippy_testing/` shims are used by unit-style tests without a full runtime.
-- Old-style `scripts/test_klippy.py` exists but pytest under `test/klippy/conftest.py` is current mechanism.
+## 测试注意事项
+- `test/conftest.py` 创建从 `test/klippy_testing_plugin.py` 到 `klippy/plugins/testing.py` 的符号链接。不要破坏此插件加载路径。
+- `test/klippy_testing/` 垫片用于无完整运行时的单元式测试。
+- 旧式 `scripts/test_klippy.py` 存在但 `test/klippy/conftest.py` 下的 pytest 是当前机制。
 
-## Docs workflow
-- Docs are built from `docs/` using the MkDocs project in `docs/_kalico/`.
-- Strict docs build command:
+## 文档工作流
+- 文档从 `docs/` 构建，使用 `docs/_kalico/` 中的 MkDocs 项目。
+- 严格文档构建命令：
   - `cd docs/_kalico && uv run mkdocs build --strict`
-- If you add a new documentation page, also update `docs/_kalico/mkdocs.yml` nav; `docs/CONTRIBUTING.md` explicitly calls this out.
-- **Math formula formatting**:
-  - Block formulas (displayed on separate lines): Use `$$ ... $$`
-    - Example: `$$ \mathbf{x} = \begin{bmatrix} T_h \\ T_b \\ T_s \end{bmatrix} $$`
-  - Inline formulas (embedded in text): Use `$ ... $`
-    - Example: `The variable $x$ represents temperature`
-  - MathJax 3 is configured in `docs/_kalico/javascripts/mathjax.js` with pymdownx.arithmatex extension
+- 如果添加新文档页面，还须更新 `docs/_kalico/mkdocs.yml` 的 nav；`docs/CONTRIBUTING.md` 明确指出这一点。
+- **数学公式格式**：
+  - 块公式（单独显示在一行）：使用 `$$ ... $$`
+    - 示例：`$$ \mathbf{x} = \begin{bmatrix} T_h \\ T_b \\ T_s \end{bmatrix} $$`
+  - 行内公式（嵌入文本中）：使用 `$ ... $`
+    - 示例：`变量 $x$ 表示温度`
+  - MathJax 3 在 `docs/_kalico/javascripts/mathjax.js` 中配置，使用 pymdownx.arithmatex 扩展
 
-## Required doc updates for user-facing changes
-- `docs/CONTRIBUTING.md` is explicit: user-facing code changes must update the reference docs.
-- At minimum, update the matching source when relevant:
-  - G-code / command params -> `docs/G-Codes.md`
-  - Config modules / params -> `docs/Config_Reference.md`
-  - Status variables -> `docs/Status_Reference.md`
-  - Webhooks / API params -> `docs/API_Server.md`
-  - Breaking config/command changes -> `docs/Config_Changes.md`
+## 面向用户变更的文档更新要求
+- `docs/CONTRIBUTING.md` 明确要求：面向用户的代码变更必须更新参考文档。
+- 至少在相关时更新对应的文档源：
+  - G-code / 命令参数 → `docs/G-Codes.md`
+  - 配置模块 / 参数 → `docs/Config_Reference.md`
+  - 状态变量 → `docs/Status_Reference.md`
+  - Webhooks / API 参数 → `docs/API_Server.md`
+  - 破坏性配置/命令变更 → `docs/Config_Changes.md`
 
-## Style and contribution constraints worth preserving
-- Follow surrounding file style rather than enforcing generic modern Python cleanup. The project explicitly prefers consistency with existing code flow/format (`docs/CONTRIBUTING.md`).
-- Avoid mixing whitespace-only edits with functional changes.
-- Fix root causes; contribution guidance explicitly expects defect fixes to target the underlying cause.
-- New Python/C source files should carry the existing copyright-header style.
+## 代码风格和贡献约束
+- 遵循周围文件风格，而不是强制通用现代 Python 清理。项目明确偏好与现有代码流/格式的一致性（`docs/CONTRIBUTING.md`）。
+- 避免将仅空白编辑与功能性更改混合。
+- 修复根本原因；贡献指导明确期望缺陷修复针对根本原因。
+- 新的 Python/C 源文件应包含现有的版权声明头样式。
 
-## Commit / PR expectations
-- Commit subject format is `module: Capitalized, short summary` where `module` is usually a repo file or directory name (`docs/CONTRIBUTING.md`).
-- Commits are expected to be single-topic and independently sensible.
-- Signed-off-by lines are required by project contribution policy.
-- **Run pre-commit checks before committing**:
-  - Install hooks once: `uv run pre-commit install`
-  - Hooks run automatically on `git commit`, or manually: `uv run pre-commit run --all-files`
-  - Pre-commit runs Ruff with `--fix` and `ruff-format` (excludes `docs/`, `config/`, `lib/`)
-- **Run whitespace check** (for source code changes):
+## 提交 / PR 期望
+- 提交主题格式为 `module: 首字母大写的简短描述`，其中 `module` 通常是仓库文件或目录名（`docs/CONTRIBUTING.md`）。
+- 提交应是单一主题且独立合理。
+- 项目贡献政策要求 Signed-off-by 行。
+- **提交前运行 pre-commit 检查**：
+  - 安装钩子一次：`uv run pre-commit install`
+  - 钩子在 `git commit` 时自动运行，或手动运行：`uv run pre-commit run --all-files`
+  - Pre-commit 使用 `--fix` 和 `ruff-format` 运行 Ruff（排除 `docs/`、`config/`、`lib/`）
+- **运行空白检查**（源代码变更时）：
   - `./scripts/check_whitespace.sh`
-  - Checks for trailing whitespace, tabs vs spaces issues in C/H/Python/Shell/Markdown files
-  - Whitespace-only changes should not be mixed with functional changes
-- **Run docs build check** (if you modified documentation):
+  - 检查 C/H/Python/Shell/Markdown 文件中的尾随空白、制表符与空格问题
+  - 空白-only 变更不应与功能性更改混合
+- **运行文档构建检查**（如果修改了文档）：
   - `cd docs/_kalico && uv run mkdocs build --strict`
-  - Strict mode fails on any warnings (broken links, missing nav entries, etc.)
-  - Required for all changes to `.md` files in `docs/`
+  - 严格模式对任何警告（断开的链接、缺失的 nav 条目等）都会失败
+  - `docs/` 中 `.md` 文件的所有变更都需要此检查
 
-## Debugging commands
-- Whitespace check: `./scripts/check_whitespace.sh`
-- Run Klippy for debugging: `python ./klippy/klippy.py ~/printer.cfg -i test.gcode -o test.serial -v -d out/klipper.dict`
-- Parse serial output: `python ./klippy/parsedump.py out/klipper.dict test.serial > test.txt`
+## 调试命令
+- 空白检查：`./scripts/check_whitespace.sh`
+- 运行 Klippy 进行调试：`python ./klippy/klippy.py ~/printer.cfg -i test.gcode -o test.serial -v -d out/klipper.dict`
+- 解析串口输出：`python ./klippy/parsedump.py out/klipper.dict test.serial > test.txt`
 
-## Practical agent guidance
-- When changing module loading, config parsing, plugin discovery, or printer startup flow, inspect `klippy/printer.py` first.
-- When changing motion/kinematics behavior, read `docs/Code_Overview.md` and relevant files in `klippy/kinematics/` and `klippy/chelper/` before editing.
-- When changing firmware build behavior, verify against `scripts/ci-build.sh`, `scripts/Dockerfile-build`, and `test/configs/*.config` instead of guessing from README prose.
+## 实用代理指导
+- 修改模块加载、配置解析、插件发现或打印机启动流程时，先检查 `klippy/printer.py`。
+- 修改运动/运动学行为时，先阅读 `docs/Code_Overview.md` 和 `klippy/kinematics/` 及 `klippy/chelper/` 中的相关文件。
+- 修改固件构建行为时，对照 `scripts/ci-build.sh`、`scripts/Dockerfile-build` 和 `test/configs/*.config` 验证，而不是从 README 文本猜测。
 
-## Personal development workspace
-- **Personal config examples**: Store in `config/myconfig/` directory.
-  - Example: `config/myconfig/alps_serial_example.cfg`
-  - These are personal test configs, NOT committed to mainline `config/` directory.
-- **Personal dev docs**: Store in `docs/mydocs/` directory.
-  - Example: `docs/mydocs/MPC v2 算法技术文档.md`
-  - These are personal notes/experiments that CAN be included in your personal documentation site.
-  - **Important**: When adding new documents to `docs/mydocs/`, you MUST also update `docs/_kalico/mkdocs.yml` navigation:
-    - Add the new document to the "我的文档" section in the `nav` configuration
-    - You can organize documents into subcategories (e.g., `MPCV2:`) for better structure
-    - Example structure:
+## 个人开发工作区
+- **个人配置示例**：存储在 `config/myconfig/` 目录。
+  - 示例：`config/myconfig/alps_serial_example.cfg`
+  - 这些是个人测试配置，不提交到主线 `config/` 目录。
+- **个人开发文档**：存储在 `docs/mydocs/` 目录。
+  - 示例：`docs/mydocs/MPC v2 算法技术文档.md`
+  - 这些是个人笔记/实验，可以包含在你的个人文档站点中。
+  - **重要**：添加新文档到 `docs/mydocs/` 时，还必须更新 `docs/_kalico/mkdocs.yml` 导航：
+    - 将新文档添加到 `nav` 配置中的"我的文档"部分
+    - 可以组织为子类别（如 `MPCV2:`）以获得更好的结构
+    - 示例结构：
       ```yaml
       - 我的文档:
         - MPCV2:
@@ -140,4 +140,4 @@
           - mydocs/MPCV2/MPC_V2.md
         - mydocs/串口压力传感器.md
       ```
-  - **Git tracking**: Unlike `config/myconfig/`, `docs/mydocs/` CAN be committed and pushed to your fork for personal documentation site deployment.
+  - **Git 跟踪**：与 `config/myconfig/` 不同，`docs/mydocs/` 可以提交并推送到你的分支用于个人文档站点部署。
