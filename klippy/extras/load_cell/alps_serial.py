@@ -211,7 +211,9 @@ class ALPSSerialSensor(LoadCellSensor):
             time.sleep(0.3)
             # 读取 v 响应（数据流的前几行）
             if self.serial_conn.in_waiting > 0:
-                resp = self.serial_conn.read(min(self.serial_conn.in_waiting, 200))
+                resp = self.serial_conn.read(
+                    min(self.serial_conn.in_waiting, 200)
+                )
                 logging.info(
                     "ALPS sensor '%s' v response (first bytes): %s",
                     self.name,
