@@ -1,6 +1,26 @@
 # Support for multi-channel RS485 Modbus RTU temperature transmitters
 # (e.g. 16-channel PT100 modules commonly sold on Taobao)
 #
+# Usage:
+#
+#   [modbus_temperature]          # or [modbus_temperature mybus]
+#       serial_path: /dev/ttyUSB0
+#       baudrate: 9600
+#       slave_id: 1
+#       register_start: 0
+#       channel_count: 16
+#       scale: 0.1
+#       signed: True
+#       func_code: 3
+#
+#   [heater_bed]
+#       sensor_type: modbus_temperature
+#       modbus_channel: 3          # one parameter and done
+#
+#   [temperature_sensor chamber]
+#       sensor_type: modbus_temperature
+#       modbus_channel: 0
+#
 # Copyright (C) 2025  Kalico Community
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
@@ -11,13 +31,13 @@ from .danger_options import get_danger_options
 
 REPORT_TIME = 1.0
 MIN_REPORT_TIME = 0.3
-DEFAULT_REG_START = 0x0000
-DEFAULT_CHANNEL_COUNT = 16
+DEFAULT_BUS_NAME = "default"
 
 
 ######################################################################
 # Minimal Modbus RTU master (no external dependency on pymodbus)
 ######################################################################
+
 
 def _crc16(data):
     crc = 0xFFFF
@@ -32,8 +52,11 @@ def _crc16(data):
 
 
 class ModbusSerial:
-    def __init__(self, serial_path, baudrate, bytesize=8, parity="N", stopbits=1):
+    def __init__(
+        self, serial_path, baudrate, bytesize=8, parity="N", stopbits=1
+    ):
         import serial
+
         self._ser = serial.Serial(
             port=serial_path,
             baudrate=baudrate,
@@ -61,7 +84,7 @@ class ModbusSerial:
         self._ser.reset_input_buffer()
         self._ser.write(bytes(frame))
 
-    def _rx(self, expected_func, expected_data_bytes=None):
+    def _rx(self, expected_func):
         head = self._ser.read(3)
         if len(head) < 3:
             raise Exception("Modbus timeout: no response header")
@@ -73,19 +96,17 @@ class ModbusSerial:
         if func != expected_func:
             raise Exception("Modbus unexpected func code: %d" % (func,))
         byte_count = head[2]
-        if expected_data_bytes is not None and byte_count != expected_data_bytes:
-            raise Exception("Modbus unexpected byte count: %d" % (byte_count,))
         data = self._ser.read(byte_count + 2)
         if len(data) < byte_count + 2:
             raise Exception("Modbus timeout: incomplete payload")
-        raw = bytes(head) + data[:byte_count + 2]
+        raw = bytes(head) + data[: byte_count + 2]
         crc_recv = data[byte_count] | (data[byte_count + 1] << 8)
         crc_calc = _crc16(raw[:-2])
         if crc_recv != crc_calc:
             raise Exception("Modbus CRC mismatch")
         return data[:byte_count]
 
-    def read_holding_registers(self, slave_id, reg_addr, count, func_code=0x03):
+    def read_registers(self, slave_id, reg_addr, count, func_code=0x03):
         with self._lock:
             payload = bytearray()
             payload.append((reg_addr >> 8) & 0xFF)
@@ -93,7 +114,7 @@ class ModbusSerial:
             payload.append((count >> 8) & 0xFF)
             payload.append(count & 0xFF)
             self._tx(slave_id, func_code, payload)
-            data = self._rx(func_code, expected_data_bytes=count * 2)
+            data = self._rx(func_code)
             regs = []
             for i in range(0, count * 2, 2):
                 regs.append((data[i] << 8) | data[i + 1])
@@ -101,92 +122,126 @@ class ModbusSerial:
 
 
 ######################################################################
-# Shared bus registry (one serial port = one ModbusSerial instance)
+# Bus configuration — registered once per [modbus_temperature] section
 ######################################################################
 
-class ModbusBusRegistry:
-    def __init__(self):
-        self._buses = {}  # key: (serial_path, baudrate, slave_id)
 
-    def get(self, key):
-        return self._buses.get(key)
+class ModbusBus:
+    def __init__(self, config, bus_name):
+        self.printer = config.get_printer()
+        self.bus_name = bus_name
 
-    def put(self, key, bus):
-        self._buses[key] = bus
+        # Shared hardware / protocol parameters
+        self.serial_path = config.get("serial_path", "/dev/ttyUSB0")
+        self.baudrate = config.getint("baudrate", 9600)
+        self.slave_id = config.getint("slave_id", 1, minval=1, maxval=247)
+        self.register_start = config.getint(
+            "register_start", 0, minval=0, maxval=0xFFFF
+        )
+        self.channel_count = config.getint(
+            "channel_count", 16, minval=1, maxval=128
+        )
+        self.data_scale = config.getfloat("scale", 0.1)
+        self.signed = config.getboolean("signed", True)
+        self.func_code = config.getint("func_code", 3, minval=1, maxval=0x7F)
+        self.report_time = config.getfloat(
+            "report_time", REPORT_TIME, minval=MIN_REPORT_TIME
+        )
 
-    def close_all(self):
-        for bus in list(self._buses.values()):
-            bus.close()
-        self._buses.clear()
+        self._bus_key = (self.serial_path, self.baudrate, self.slave_id)
+        self._is_debug = (
+            self.printer.get_start_args().get("debugoutput") is not None
+        )
+
+    def open_serial(self):
+        """Open the Modbus serial port on first use. Returns ModbusSerial.
+        Multiple ModbusBus instances with the same (path, baud, slave) share
+        a single ModbusSerial instance — but typically there is only one
+        bus per (path, baud, slave)."""
+        registry = _modbus_get_registry(self.printer)
+        bus = registry.get(self._bus_key)
+        if bus is not None:
+            return bus
+        bus = ModbusSerial(self.serial_path, self.baudrate)
+        registry.put(self._bus_key, bus)
+        return bus
 
 
-_modbus_registry = ModbusBusRegistry()
+# Simple process-wide serial instance registry, keyed by printer object
+# so tests don't bleed into each other.
+_modbus_registries = {}
+_modbus_registries_lock = threading.Lock()
+
+
+def _modbus_get_registry(printer):
+    with _modbus_registries_lock:
+        key = id(printer)
+        if key not in _modbus_registries:
+            _modbus_registries[key] = {}
+        return _modbus_registries[key]
 
 
 ######################################################################
-# Sensor: a single channel out of N on a shared Modbus bus
+# Sensor factory — registered under name "modbus_temperature"
 ######################################################################
 
-class ModbusTemperature:
+
+class ModbusTemperatureSensor:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()
         self.name = config.get_name().split()[-1]
-
-        # Bus parameters (shared across all channels of the same device)
-        self.serial_path = config.get("modbus_serial", "/dev/ttyUSB0")
-        self.baudrate = config.getint("modbus_baud", 9600)
-        self.slave_id = config.getint("modbus_slave", 1, minval=1, maxval=247)
-
-        # Data layout
-        self.register_start = config.getint(
-            "modbus_register_start", DEFAULT_REG_START, minval=0, maxval=0xFFFF
-        )
-        self.channel_count = config.getint(
-            "modbus_channel_count", DEFAULT_CHANNEL_COUNT, minval=1, maxval=128
-        )
-        self.channel = config.getint("modbus_channel", 0, minval=0)
-        self.data_scale = config.getfloat("modbus_scale", 0.1)
-        self.signed = config.getboolean("modbus_signed", True)
-        self.func_code = config.getint("modbus_func_code", 0x03)
-
-        if self.channel >= self.channel_count:
-            raise config.error(
-                "modbus_temperature: channel %d >= channel_count %d"
-                % (self.channel, self.channel_count)
-            )
-
-        self.report_time = config.getfloat(
-            "modbus_report_time", REPORT_TIME, minval=MIN_REPORT_TIME
-        )
-        self.temp = self.min_temp = self.max_temp = 0.0
-        self._last_read_time = 0.0
         self._callback = None
 
-        bus_key = (self.serial_path, self.baudrate, self.slave_id)
-        self._bus_key = bus_key
+        # Find the bus configuration.  Try in order:
+        #   1) an explicit modbus_bus: <name> in the calling section
+        #   2) a bus named "default"  ([modbus_temperature] with no suffix)
+        #   3) any single [modbus_temperature <any>] section if there's only one
+        bus_name = config.get("modbus_bus", None)
+        bus = self._lookup_bus(bus_name, config)
+        self._bus = bus
 
-        # Debug mode: skip hardware and just return 0.0
-        if self.printer.get_start_args().get("debugoutput") is not None:
-            self._is_debug = True
-            self._bus = None
-        else:
-            self._is_debug = False
-            self._bus = _modbus_registry.get(bus_key)
-            if self._bus is None:
-                try:
-                    self._bus = ModbusSerial(
-                        self.serial_path, self.baudrate
-                    )
-                    _modbus_registry.put(bus_key, self._bus)
-                except Exception as e:
-                    raise config.error(
-                        "modbus_temperature: Unable to open %s (%s)"
-                        % (self.serial_path, e)
-                    )
+        # Channel — the only parameter that must come from the calling section
+        self.channel = config.getint("modbus_channel", 0, minval=0)
+        if self.channel >= bus.channel_count:
+            raise config.error(
+                "modbus_temperature: channel %d >= channel_count %d on bus '%s'"
+                % (self.channel, bus.channel_count, bus.bus_name)
+            )
 
-        self.sample_timer = self.reactor.register_timer(self._sample_temperature)
-        self.printer.register_event_handler("klippy:connect", self._handle_connect)
+        # Per-instance overrides (all optional)
+        self.data_scale = config.getfloat("scale", bus.data_scale)
+        self.signed = config.getboolean("signed", bus.signed)
+        self.func_code = config.getint(
+            "func_code", bus.func_code, minval=1, maxval=0x7F
+        )
+        self.register_start = config.getint(
+            "register_start", bus.register_start, minval=0, maxval=0xFFFF
+        )
+        self.channel_count = bus.channel_count
+        self.slave_id = bus.slave_id
+        self.report_time = config.getfloat(
+            "report_time", bus.report_time, minval=MIN_REPORT_TIME
+        )
+        self._bus_key = bus._bus_key
+        self._is_debug = bus._is_debug
+
+        self.temp = self.min_temp = self.max_temp = 0.0
+        self.sample_timer = self.reactor.register_timer(
+            self._sample_temperature
+        )
+        self.printer.register_event_handler(
+            "klippy:connect", self._handle_connect
+        )
+
+    def _lookup_bus(self, bus_name, config):
+        manager = self.printer.lookup_object("modbus_temperature", None)
+        if manager is None:
+            raise config.error(
+                "modbus_temperature: no [modbus_temperature] section found; "
+                "please add one before using sensor_type: modbus_temperature"
+            )
+        return manager.get_bus(bus_name, config)
 
     def _handle_connect(self):
         self.reactor.update_timer(self.sample_timer, self.reactor.NOW)
@@ -207,11 +262,14 @@ class ModbusTemperature:
             if self._callback is not None:
                 mcu = self.printer.lookup_object("mcu")
                 measured_time = self.reactor.monotonic()
-                self._callback(mcu.estimated_print_time(measured_time), self.temp)
+                self._callback(
+                    mcu.estimated_print_time(measured_time), self.temp
+                )
             return eventtime + self.report_time
 
         try:
-            regs = self._bus.read_holding_registers(
+            serial = self._bus.open_serial()
+            regs = serial.read_registers(
                 self.slave_id,
                 self.register_start,
                 self.channel_count,
@@ -226,8 +284,9 @@ class ModbusTemperature:
             raw = raw - 0x10000
         self.temp = float(raw) * self.data_scale
 
-        if (self.temp < self.min_temp or self.temp > self.max_temp) \
-                and not get_danger_options().temp_ignore_limits:
+        if (
+            self.temp < self.min_temp or self.temp > self.max_temp
+        ) and not get_danger_options().temp_ignore_limits:
             self.printer.invoke_shutdown(
                 "MODBUS temperature %0.1f outside range of %0.1f:%.01f"
                 % (self.temp, self.min_temp, self.max_temp)
@@ -245,9 +304,100 @@ class ModbusTemperature:
 
 
 ######################################################################
-# Module entrypoint — register as a temperature sensor factory
+# Manager: holds the collection of named buses for this printer
 ######################################################################
 
+
+class PrinterModbusManager:
+    def __init__(self, config):
+        self.printer = config.get_printer()
+        self._buses = {}  # name -> ModbusBus
+
+    def add_bus(self, bus):
+        if bus.bus_name in self._buses:
+            raise self.printer.config_error(
+                "modbus_temperature: bus '%s' defined more than once"
+                % (bus.bus_name,)
+            )
+        self._buses[bus.bus_name] = bus
+
+    def get_bus(self, name, config):
+        if name is None:
+            # Default: try "default" first, else pick the only configured one
+            if DEFAULT_BUS_NAME in self._buses:
+                return self._buses[DEFAULT_BUS_NAME]
+            if len(self._buses) == 1:
+                return next(iter(self._buses.values()))
+            if len(self._buses) == 0:
+                raise config.error(
+                    "modbus_temperature: no bus configured; add a "
+                    "[modbus_temperature] section first"
+                )
+            raise config.error(
+                "modbus_temperature: multiple buses configured; please "
+                "specify 'modbus_bus: <name>' to choose one"
+            )
+        if name not in self._buses:
+            raise config.error(
+                "modbus_temperature: bus '%s' not found; available: %s"
+                % (name, ", ".join(sorted(self._buses.keys())))
+            )
+        return self._buses[name]
+
+
+######################################################################
+# Module entry points
+######################################################################
+
+
+def _get_manager(config):
+    printer = config.get_printer()
+    manager = printer.lookup_object("modbus_temperature", None)
+    if manager is None:
+        manager = PrinterModbusManager(config)
+        printer.add_object("modbus_temperature", manager)
+        # Register the sensor factory once — on first bus section load.
+        pheaters = printer.load_object(config, "heaters")
+        pheaters.add_sensor_factory(
+            "modbus_temperature", ModbusTemperatureSensor
+        )
+    return manager
+
+
+def _section_has_user_config(config):
+    # True if the section contains real user-provided values.  The empty
+    # [modbus_temperature] stub in temperature_sensors.cfg would fail this
+    # so we only register the factory without creating a default bus.
+    known_keys = {
+        "serial_path",
+        "baudrate",
+        "slave_id",
+        "register_start",
+        "channel_count",
+        "scale",
+        "signed",
+        "func_code",
+        "report_time",
+    }
+    raw = config.getsection(config.get_name()).get_options()
+    return any(k in known_keys for k in raw)
+
+
 def load_config(config):
-    pheaters = config.get_printer().load_object(config, "heaters")
-    pheaters.add_sensor_factory("modbus_temperature", ModbusTemperature)
+    # Handles the bare [modbus_temperature] section (no suffix).
+    # Always ensure manager exists and factory is registered.  Only create the
+    # "default" bus if the section actually contains user parameters —
+    # the temperature_sensors.cfg stub is intentionally empty and must not
+    # silently create a default-bus entry.
+    manager = _get_manager(config)
+    if _section_has_user_config(config):
+        manager.add_bus(ModbusBus(config, DEFAULT_BUS_NAME))
+    return manager
+
+
+def load_config_prefix(config):
+    # Handles [modbus_temperature mybus] → named bus
+    manager = _get_manager(config)
+    bus_name = config.get_name().split(" ", 1)[1]
+    manager.add_bus(ModbusBus(config, bus_name))
+    return manager
