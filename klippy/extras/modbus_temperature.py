@@ -610,7 +610,7 @@ def _section_has_bus_config(config):
     always returns False."""
     if config.get_name() == FACTORY_LOADER_SECTION:
         return False
-    raw = config.get_options()
+    raw = config.fileconfig.options(config.section)
     return any(k in BUS_CONFIG_KEYS for k in raw)
 
 
