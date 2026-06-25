@@ -1,5 +1,11 @@
-# Support for multi-channel RS485 Modbus RTU temperature transmitters
-# (e.g. 16-channel PT100 modules commonly sold on Taobao).
+# Support for multi-channel RS485 Modbus RTU temperature transmitters.
+#
+# Tested with the SHZK thermocouple series (北京山河行科技 S16TC etc.)
+# which uses 16-bit signed holding registers at address 0x0000, one per
+# channel, with a 0.1 scale factor (raw 2500 = 250.0 °C).
+# Unconnected channels return 3000 (300.0 °C) as a sentinel; this
+# module detects and flags that value so it cannot accidentally trigger
+# a thermal shutdown.
 #
 # -------------------------------------------------------------------
 # Configuration flow
@@ -59,6 +65,11 @@ CHANNEL_COUNT_DEFAULT = 16
 DATA_SCALE_DEFAULT = 0.1
 READ_FUNCS = frozenset({0x03, 0x04})
 
+# SHZK thermocouple modules report 3000 (raw) = 300.0 °C on channels
+# that have no sensor connected.  We treat that raw value as an error
+# rather than a real temperature so it can't trigger a shutdown.
+SENSOR_DISCONNECTED_RAW = 3000
+
 # Keys that distinguish a bus configuration from a mere factory-loader stub
 BUS_CONFIG_KEYS = frozenset(
     {
@@ -74,6 +85,7 @@ BUS_CONFIG_KEYS = frozenset(
         "bytesize",
         "parity",
         "stopbits",
+        "disconnected_raw",
     }
 )
 
@@ -282,6 +294,12 @@ class ModbusBus:
             REPORT_TIME,
             minval=MIN_REPORT_TIME,
         )
+        # Raw value returned for a channel with no sensor attached.
+        # SHZK thermocouple modules return 3000 (= 300.0 °C) by default.
+        # Set to a value outside the valid range (e.g. -1) to disable.
+        self.disconnected_raw = config.getint(
+            "disconnected_raw", SENSOR_DISCONNECTED_RAW
+        )
 
         # Identifies a unique physical bus. Used for port sharing.
         self.bus_key = (
@@ -371,6 +389,9 @@ class ModbusTemperatureSensor:
             bus.report_time,
             minval=MIN_REPORT_TIME,
         )
+        self.disconnected_raw = config.getint(
+            "disconnected_raw", bus.disconnected_raw
+        )
         if self.func_code not in READ_FUNCS:
             raise config.error(
                 "modbus_temperature: per-sensor func_code must be 3 or 4"
@@ -381,6 +402,7 @@ class ModbusTemperatureSensor:
         # Runtime state
         self.temp = self.min_temp = self.max_temp = 0.0
         self._consecutive_errors = 0
+        self._disconnected_logged = False
 
         self.sample_timer = self.reactor.register_timer(
             self._sample_temperature
@@ -465,6 +487,28 @@ class ModbusTemperatureSensor:
         # Happy path
         self._consecutive_errors = 0
         raw = regs[self.channel]
+
+        # Detect disconnected sensor (SHZK modules return 3000 = 300.0 °C
+        # for channels with no thermocouple attached).  We log a warning
+        # once and keep the last known good temperature instead of
+        # letting the sentinel value propagate to the heater PID loop.
+        if raw == self.disconnected_raw:
+            if not self._disconnected_logged:
+                logging.warning(
+                    "modbus_temperature: channel %d on bus '%s' reports"
+                    " sensor disconnected (raw=%d); keeping last temp",
+                    self.channel,
+                    self._bus.bus_name,
+                    raw,
+                )
+                self._disconnected_logged = True
+            if self._callback is not None:
+                mcu = self.printer.lookup_object("mcu")
+                now = self.reactor.monotonic()
+                self._callback(mcu.estimated_print_time(now), self.temp)
+            return now + self.report_time
+        self._disconnected_logged = False
+
         if self.signed and raw & 0x8000:
             raw = raw - 0x10000
         self.temp = float(raw) * self.data_scale
