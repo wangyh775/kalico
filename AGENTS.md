@@ -117,6 +117,31 @@
 - 运行 Klippy 进行调试：`python ./klippy/klippy.py ~/printer.cfg -i test.gcode -o test.serial -v -d out/klipper.dict`
 - 解析串口输出：`python ./klippy/parsedump.py out/klipper.dict test.serial > test.txt`
 
+## 远程打印机调试（强制要求）
+
+调试远程 Klipper 主机上的代码时，**绝不能直接修改远程主机代码**。必须遵循以下工作流：
+
+1. **本地编辑** — 在本地工作树中修改
+2. **提交并推送** — 将分支推送到远程 Git 仓库
+3. **SSH 连接打印机** — `ssh klipper@10.42.110.102`（密钥认证）
+4. **打印机拉取** — `cd /home/klipper/klipper && git fetch kalico <branch> && git checkout <branch>`
+5. **重启 Klipper** — `curl -X POST http://10.42.110.102/printer/firmware_restart`
+
+**分支生命周期**：调试分支基于最新的 `test` 远程分支创建工作树，创建工作树前应先更新本地 `test` 分支，开发完成后经用户允许创建 PR 合并到 `test`。打印机运行 `test` 分支。
+
+### 配置修改
+- 配置文件可通过 Moonraker API 直接上传：`POST /server/files/upload`
+- 配置修改后需重启 Klipper（API 或 `FIRMWARE_RESTART` G-code）
+
+### 打印机信息
+- 主机：`10.42.110.102` | SSH：`klipper@10.42.110.102`（密钥认证）
+- Git 远程：`kalico` → `git@github.com:877660224/kalico.git`
+- Moonraker API：`http://10.42.110.102`
+
+### 安全
+- Z 轴必须高于 75mm 才能移动 XY 轴离开原位（碰撞风险）
+- 发送移动命令前必须通过 API 检查位置
+
 ## 实用代理指导
 - 修改模块加载、配置解析、插件发现或打印机启动流程时，先检查 `klippy/printer.py`。
 - 修改运动/运动学行为时，先阅读 `docs/Code_Overview.md` 和 `klippy/kinematics/` 及 `klippy/chelper/` 中的相关文件。
