@@ -885,14 +885,19 @@ class PrinterSensorFusion:
         }
 
     def stats(self, eventtime):
+        channel_str = " ".join(
+            "ch%d=%.2f" % (ch, t)
+            for ch, t in zip(self.modbus_channels, self.last_raw_temps)
+        )
         return (
             False,
-            "temperature_fusion: temp=%.2f conf=%.2f valid=%d/%d"
+            "temperature_fusion: temp=%.2f conf=%.2f valid=%d/%d %s"
             % (
                 self.last_temp,
                 self.last_confidence,
                 self.last_valid_count,
                 len(self.modbus_channels),
+                channel_str,
             ),
         )
 
