@@ -149,7 +149,6 @@ class WeightedMeanStrategy(FusionStrategy):
         deviations = [abs(s.temperature - self._weighted_mean) for s in samples]
         self._mad = _median(deviations)
 
-        total = len(samples)
         for i, s in enumerate(samples):
             if self._mad > 0:
                 z = 0.6745 * deviations[i] / self._mad
@@ -486,20 +485,19 @@ class PrinterSensorFusion:
 
         # --- Configuration ---
         self.modbus_bus_name = config.get("modbus_bus", None)
-        self.modbus_channels = config.getlist("modbus_channels", [])
+        self.modbus_channels = config.getintlist("modbus_channels", [])
         if not self.modbus_channels:
             raise config.error(
                 "temperature_fusion[%s]: 'modbus_channels' is required"
                 % (self.name,)
             )
-        self.modbus_channels = [int(ch) for ch in self.modbus_channels]
 
         num_channels = len(self.modbus_channels)
 
         # Weights (default: all 1.0)
-        weights_raw = config.get("weights", None)
+        weights_raw = config.getfloatlist("weights", None)
         if weights_raw is not None:
-            self.weights = [float(w) for w in weights_raw]
+            self.weights = list(weights_raw)
             if len(self.weights) != num_channels:
                 raise config.error(
                     "temperature_fusion[%s]: weights length %d != "
@@ -510,7 +508,7 @@ class PrinterSensorFusion:
             self.weights = [1.0] * num_channels
 
         # Zones (optional, diagnostic only)
-        zones_raw = config.get("zones", None)
+        zones_raw = config.getlist("zones", None)
         if zones_raw is not None:
             self.zones = list(zones_raw)
             if len(self.zones) != num_channels:
@@ -549,9 +547,9 @@ class PrinterSensorFusion:
             self.positions = [None] * num_channels
 
         # Noise variances (for Kalman strategy)
-        noise_raw = config.get("noise_variance", None)
+        noise_raw = config.getfloatlist("noise_variance", None)
         if noise_raw is not None:
-            self.noise_variance = [float(v) for v in noise_raw]
+            self.noise_variance = list(noise_raw)
             if len(self.noise_variance) != num_channels:
                 raise config.error(
                     "temperature_fusion[%s]: noise_variance length %d != "
@@ -575,10 +573,11 @@ class PrinterSensorFusion:
             )
         strategy_class = _fusion_strategies[strategy_name]
 
-        # Build strategy_config dict from fusion_* prefixed keys
+        # Build strategy_config dict from fusion_* prefixed keys.
+        # All strategy config values are floats.
         strategy_config = {}
         for key in strategy_class.STRATEGY_CONFIG_KEYS:
-            val = config.get("fusion_" + key, None)
+            val = config.getfloat("fusion_" + key, None)
             if val is not None:
                 strategy_config[key] = val
 
@@ -838,9 +837,13 @@ class PrinterSensorFusion:
         self.last_valid_count = result.valid_samples
         self.last_excluded = result.excluded_samples
 
-        if result.temperature > 0:
-            self.measured_min = min(self.measured_min, result.temperature)
-            self.measured_max = max(self.measured_max, result.temperature)
+        if result.temperature:
+            if self.measured_min > self.measured_max:
+                # First valid reading — initialize both
+                self.measured_min = self.measured_max = result.temperature
+            else:
+                self.measured_min = min(self.measured_min, result.temperature)
+                self.measured_max = max(self.measured_max, result.temperature)
 
         if self._callback is not None:
             mcu = self.printer.lookup_object("mcu")
