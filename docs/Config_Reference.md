@@ -3696,6 +3696,64 @@ sensor_type: temperature_combined
 #   to combine (e.g. 5 degrees). To disable it, use a large value (e.g. 999.9)
 ```
 
+### Fused temperature sensor
+
+Fused temperature sensor is a virtual sensor that combines multiple Modbus
+channels into one representative temperature using pluggable fusion
+strategies (weighted mean, robust median, or Kalman filter). It reads
+directly from a `[modbus_temperature]` bus — see that section for bus
+configuration.
+
+```
+sensor_type: temperature_fusion
+#modbus_bus:
+#   Name of the modbus bus to read from. If only one bus is configured
+#   this can be omitted.
+#modbus_channels:
+#   Must be provided. Comma-separated list of modbus channel numbers
+#   (0-based) to fuse. Each must be less than the bus channel_count.
+#   E.g. '0,1,2,3,4,5,6,7,8,9,10,11'
+#weights:
+#   Optional. Comma-separated weight for each channel (default: all 1.0).
+#   Used by weighted_mean and robust_median strategies.
+#   E.g. '1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0'
+#zones:
+#   Optional. Comma-separated zone label for each channel (diagnostic only,
+#   does not affect fusion). E.g. 'inlet,outlet,bed,bed,side,side,...'
+#positions:
+#   Optional. Flat list of x,y,z coordinates for each channel. Reserved
+#   for future spatial weighting strategies.
+#noise_variance:
+#   Optional. Per-channel measurement noise variance. Required for the
+#   kalman strategy; ignored by other strategies.
+#fusion_strategy:
+#   Strategy name. One of: weighted_mean (default), robust_median, kalman.
+#   Custom strategies can be registered via register_fusion_strategy().
+#fusion_outlier_zscore:
+#   Modified Z-score threshold for outlier rejection (weighted_mean only,
+#   default: 3.5). Set a large value to disable rejection.
+#fusion_iqr_multiplier:
+#   IQR multiplier for outlier rejection (robust_median only, default: 1.5).
+#fusion_q:
+#   Process noise variance (kalman only, default: 0.01).
+#fusion_r_default:
+#   Default measurement noise when noise_variance is not specified
+#   (kalman only, default: 0.1).
+#fusion_init_p:
+#   Initial covariance estimate (kalman only, default: 10.0).
+#report_time:
+#   Sampling period in seconds (default: 1.0, minimum: 0.3).
+#min_temp:
+#   Minimum fused temperature. Out-of-range triggers shutdown (default: 0).
+#max_temp:
+#   Maximum fused temperature (default: 99999999.9).
+#maximum_deviation:
+#   Maximum allowed difference between any two channels. Exceeding triggers
+#   shutdown (default: 999.0, effectively disabled).
+#gcode_id:
+#   Optional gcode ID for M105 reporting.
+```
+
 ### MPC Ambient Sensor
 
 Virtual MPC sensor to show the internal ambient temperature value (defaults to 25 if any other algorithm than MPC is used)

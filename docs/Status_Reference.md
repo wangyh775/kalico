@@ -567,6 +567,24 @@ objects:
 - `humidity`, `pressure`, `gas`: The last read values from the sensor
   (only on bme280, htu21d, sht3x and lm75 sensors).
 
+## temperature_fusion
+
+The following information is available in
+[temperature_fusion config_section_name](Config_Reference.md#fused-temperature-sensor)
+objects:
+- `temperature`: The fused temperature.
+- `confidence`: Confidence score (0.0-1.0) based on valid sample ratio
+  and inter-channel consistency.
+- `valid_samples`: Number of valid samples in the current cycle.
+- `total_samples`: Total number of configured channels.
+- `samples`: List of per-channel data (channel, temperature, weight, zone,
+  valid).
+- `excluded`: List of channels excluded this cycle, with reason.
+- `strategy`: Strategy-internal diagnostics (e.g. MAD/z-scores for
+  weighted_mean, covariance for kalman).
+- `measured_min_temp`, `measured_max_temp`: The lowest and highest fused
+  temperature since startup.
+
 ## temperature_fan
 
 The following information is available in
