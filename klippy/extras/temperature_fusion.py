@@ -215,6 +215,94 @@ class WeightedMeanStrategy(FusionStrategy):
         self._z_scores = []
 
 
+class LayeredWeightedMeanStrategy(WeightedMeanStrategy):
+    """Weighted-mean with per-layer weights for symmetric sensor layouts.
+
+    Designed for chambers where N sensors form k physical layers (e.g. a
+    horizontal plane with 4 corners per layer, 3 layers = 12 sensors).
+    Each layer shares one weight; the layer_assignment list maps every
+    channel index to its layer index.  Outlier rejection (MAD + modified
+    Z-score) is inherited unchanged from WeightedMeanStrategy.
+    """
+
+    STRATEGY_CONFIG_KEYS = ["outlier_zscore"]
+
+    def __init__(self, strategy_config, num_channels):
+        super().__init__(strategy_config, num_channels)
+        # layer_assignment[ch_idx] -> layer_idx
+        # layer_weights[layer_idx] -> weight for all channels in that layer
+        # Expanded per-channel weights are stored in self._channel_weights.
+        self.layer_assignment = strategy_config.get("layer_assignment", [])
+        self.layer_weights = strategy_config.get("layer_weights", [])
+        self._channel_weights = []
+        self._layer_means = []
+        self._layer_counts = []
+        self._expand_weights()
+
+    def _expand_weights(self):
+        """Expand layer_weights into per-channel via layer_assignment."""
+        if not self.layer_assignment or not self.layer_weights:
+            # Fall back to uniform weight 1.0 for every channel
+            self._channel_weights = [1.0] * self.num_channels
+            return
+
+        num_layers = len(self.layer_weights)
+        self._channel_weights = []
+        for layer_idx in self.layer_assignment:
+            if layer_idx < 0 or layer_idx >= num_layers:
+                # Invalid layer index -> uniform fallback for this channel
+                self._channel_weights.append(1.0)
+            else:
+                self._channel_weights.append(self.layer_weights[layer_idx])
+
+    def update(self, samples, eventtime):
+        # Override each sample's weight with the expanded layer weight,
+        # then delegate the rest (weighted mean, MAD, Z-score, exclusion)
+        # to the parent implementation.
+        for i, s in enumerate(samples):
+            if i < len(self._channel_weights):
+                s.weight = self._channel_weights[i]
+        super().update(samples, eventtime)
+
+        # Per-layer diagnostics: mean temperature of each layer's samples
+        # (after exclusion).  Useful for tracking vertical gradients and
+        # detecting intra-layer faults.
+        self._layer_means = []
+        self._layer_counts = []
+        if not self.layer_assignment:
+            return
+        num_layers = max(self.layer_assignment) + 1
+        for layer_idx in range(num_layers):
+            layer_temps = [
+                s.temperature
+                for i, s in enumerate(self._last_samples)
+                if i < len(self.layer_assignment)
+                and self.layer_assignment[i] == layer_idx
+                and i < len(self._z_scores)
+                and self._z_scores[i] <= self.outlier_zscore
+            ]
+            if layer_temps:
+                self._layer_means.append(
+                    round(sum(layer_temps) / len(layer_temps), 2)
+                )
+                self._layer_counts.append(len(layer_temps))
+            else:
+                self._layer_means.append(None)
+                self._layer_counts.append(0)
+
+    def get_diagnostics(self):
+        diag = super().get_diagnostics()
+        diag["layer_weights"] = list(self.layer_weights)
+        diag["layer_means"] = list(self._layer_means)
+        diag["layer_counts"] = list(self._layer_counts)
+        return diag
+
+    def reset(self):
+        super().reset()
+        self._layer_means = []
+        self._layer_counts = []
+
+
 class RobustMedianStrategy(FusionStrategy):
     """Weighted median with IQR-based outlier rejection."""
 
@@ -446,6 +534,9 @@ def register_fusion_strategy(name, factory_class):
 
 def _register_builtin_strategies():
     register_fusion_strategy("weighted_mean", WeightedMeanStrategy)
+    register_fusion_strategy(
+        "layered_weighted_mean", LayeredWeightedMeanStrategy
+    )
     register_fusion_strategy("robust_median", RobustMedianStrategy)
     register_fusion_strategy("kalman", KalmanFusionStrategy)
 
@@ -574,12 +665,51 @@ class PrinterSensorFusion:
         strategy_class = _fusion_strategies[strategy_name]
 
         # Build strategy_config dict from fusion_* prefixed keys.
-        # All strategy config values are floats.
+        # Most strategy config values are floats.
         strategy_config = {}
         for key in strategy_class.STRATEGY_CONFIG_KEYS:
             val = config.getfloat("fusion_" + key, None)
             if val is not None:
                 strategy_config[key] = val
+
+        # LayeredWeightedMeanStrategy needs layer_assignment (intlist)
+        # and layer_weights (floatlist).  These do not fit the fusion_*
+        # float convention, so they are parsed separately and validated
+        # against num_channels / layer count.
+        if strategy_class is LayeredWeightedMeanStrategy:
+            layer_assignment = config.getintlist("layer_assignment", [])
+            if layer_assignment:
+                if len(layer_assignment) != num_channels:
+                    raise config.error(
+                        "temperature_fusion[%s]: layer_assignment length "
+                        "%d != modbus_channels length %d"
+                        % (self.name, len(layer_assignment), num_channels)
+                    )
+                if min(layer_assignment) < 0:
+                    raise config.error(
+                        "temperature_fusion[%s]: layer_assignment contains "
+                        "negative index" % (self.name,)
+                    )
+            strategy_config["layer_assignment"] = layer_assignment
+
+            layer_weights = config.getfloatlist("layer_weights", [])
+            if layer_assignment and not layer_weights:
+                raise config.error(
+                    "temperature_fusion[%s]: layer_weights is required when "
+                    "layer_assignment is set" % (self.name,)
+                )
+            if layer_weights and layer_assignment:
+                if max(layer_assignment) >= len(layer_weights):
+                    raise config.error(
+                        "temperature_fusion[%s]: layer_assignment references "
+                        "layer %d but only %d layer_weights given"
+                        % (
+                            self.name,
+                            max(layer_assignment),
+                            len(layer_weights),
+                        )
+                    )
+            strategy_config["layer_weights"] = layer_weights
 
         self._strategy_name = strategy_name
         self._strategy = strategy_class(strategy_config, num_channels)
@@ -950,6 +1080,7 @@ class PrinterSensorFusion:
                 if cls
                 in (
                     WeightedMeanStrategy,
+                    LayeredWeightedMeanStrategy,
                     RobustMedianStrategy,
                     KalmanFusionStrategy,
                 )

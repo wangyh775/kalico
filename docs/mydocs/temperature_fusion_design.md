@@ -59,8 +59,9 @@ FusionStrategy (抽象基类)
 ├── fuse() -> FusionResult                          # 返回融合温度 + 置信度
 └── get_diagnostics() -> dict                       # 策略内部状态用于 status
 
-# 内置 3 个策略
+# 内置 4 个策略
 WeightedMeanStrategy                # 默认:加权平均 + MAD 离群剔除
+LayeredWeightedMeanStrategy         # 分层加权平均(MAD 剔除继承自 weighted_mean)
 RobustMedianStrategy                # 鲁棒中位数 + IQR 离群剔除
 KalmanFusionStrategy               # 状态空间融合 + 方差估计
 
@@ -155,7 +156,9 @@ fusion_strategy: kalman
 | `zones` | list[str] | 空 | 每个通道的区域标签(可选)。仅诊断/状态上报用,不影响融合算法本身(算法只看 weights)。 |
 | `positions` | list[tuple] | 空 | 每个通道的空间坐标 `[x0,y0,z0, x1,y1,z1, ...]`。预留给未来空间加权策略,当前不强制使用。 |
 | `noise_variance` | list[float] | 空 | 每个通道的测量噪声方差。Kalman 策略必填;其他策略忽略。 |
-| `fusion_strategy` | str | `weighted_mean` | 融合策略名。内置:`weighted_mean` / `robust_median` / `kalman`。自定义策略通过 `register_fusion_strategy()` 注册。 |
+| `fusion_strategy` | str | `weighted_mean` | 融合策略名。内置:`weighted_mean` / `layered_weighted_mean` / `robust_median` / `kalman`。自定义策略通过 `register_fusion_strategy()` 注册。 |
+| `layer_assignment` | list[int] | 空 | 仅 `layered_weighted_mean` 策略使用。长度必须等于 `modbus_channels`,值是层索引。把每个通道映射到所属物理层。 |
+| `layer_weights` | list[float] | 空 | 仅 `layered_weighted_mean` 策略使用。每层一个权重,长度 = 层数 = `max(layer_assignment)+1`。设了 `layer_assignment` 时必填。 |
 | `fusion_*` | any | — | 任意 `fusion_` 前缀字段透传给策略类,由策略类自己解析。如 `fusion_outlier_zscore: 3.0`、`fusion_q: 0.01`、`fusion_r: 0.1`。 |
 | `report_time` | float | 1.0 | 采样周期(秒)。每个周期读一次 modbus 并更新融合值。最小 0.3。 |
 | `min_temp` | float | 0 K | 融合温度下限。超出触发 `invoke_shutdown`(受 `temp_ignore_limits` 影响)。 |
@@ -171,6 +174,10 @@ fusion_strategy: kalman
 4. `fusion_strategy` 必须已注册,否则 `config.error("temperature_fusion: unknown strategy 'xxx'; available: ...")`
 5. `min_temp < max_temp`
 6. 每个通道号 `0 ≤ ch < bus.channel_count`(延迟到 `_handle_connect` 才能校验,因为 bus 此时才能 lookup)
+7. `layered_weighted_mean` 策略专属:
+   - `layer_assignment` 若提供,长度必须等于 `modbus_channels`,且无负索引
+   - `layer_assignment` 非空时 `layer_weights` 必填
+   - `max(layer_assignment) < len(layer_weights)`(所有层索引都能在 `layer_weights` 中找到)
 
 ### `fusion_` 前缀透传规则
 
@@ -248,7 +255,61 @@ class FusionStrategy:
 
 **诊断输出**:`{"excluded": [...], "mad": ..., "weighted_mean": ..., "z_scores": [...]}`
 
-### 内置策略 2:`robust_median`
+### 内置策略 2:`layered_weighted_mean`
+
+**算法**:分层加权平均 + MAD 离群剔除(继承自 `weighted_mean`)
+
+**适用场景**:腔体水平面四角对称、同一高度层 4 个传感器物理等价的多层布局(典型 3 层 × 4 角 = 12 传感器)。把 12 个 per-channel 权重简化为 3 个 per-layer 权重,配置更短、语义更清晰,且支持层内一致性诊断。
+
+**步骤**:
+
+1. `__init__` 阶段:`_expand_weights()` 把 `layer_weights` 按 `layer_assignment` 展开成 per-channel 权重列表
+2. 每周期 `update()`:
+   - 把展开后的权重覆盖到每个 `SensorSample.weight`
+   - 调用 `super().update()`(即 `WeightedMeanStrategy.update`),执行加权平均 + MAD + 修正 Z-score 剔除
+   - 计算每层均值(用于诊断):按 `layer_assignment` 分组,对未被剔除的样本求平均
+3. `fuse()` 完全继承父类,置信度公式不变
+
+**权重展开规则**:
+
+$$ w_i = W_{\text{layer\_assignment}[i]} $$
+
+例:`layer_assignment = [0,0,0,0, 1,1,1,1, 2,2,2,2]`、`layer_weights = [1.0, 1.5, 0.8]` 展开为 `[1.0,1.0,1.0,1.0, 1.5,1.5,1.5,1.5, 0.8,0.8,0.8,0.8]`,等价于显式写 `weights`。
+
+**配置字段**:
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `fusion_outlier_zscore` | 3.5 | 修正 Z 分数阈值,继承自 `weighted_mean`。 |
+| `layer_assignment` | 空 | 通道到层索引的映射,长度 = `modbus_channels`。 |
+| `layer_weights` | 空 | 每层一个权重,长度 = `max(layer_assignment)+1`。 |
+
+**与 `weights` 的关系**:两者可同时配置,但 `layer_weights` 会在 `update()` 里覆盖 `weights`。语义上 `weights` 被忽略——和 `kalman` 策略忽略 `weights` 一样,是策略自身的职责。建议只用 `layer_weights`,不配 `weights`。
+
+**状态**:无状态策略(权重展开在 `__init__` 一次完成,运行时只读)
+
+**诊断输出**:`{"excluded": [...], "mad": ..., "weighted_mean": ..., "z_scores": [...], "layer_weights": [...], "layer_means": [...], "layer_counts": [...]}`
+
+- `layer_means`:每层未被剔除样本的平均温度。用于追踪竖直温度梯度和检测层内故障
+- `layer_counts`:每层未被剔除的样本数。某层 count < 4 表明该层有传感器被剔除
+
+**配置示例**:
+
+```ini
+[heater_generic chamber]
+sensor_type: temperature_fusion
+modbus_channels: 0,1,2,3,4,5,6,7,8,9,10,11
+fusion_strategy: layered_weighted_mean
+# 通道0-3=底层,4-7=中层,8-11=顶层
+layer_assignment: 0,0,0,0,1,1,1,1,2,2,2,2
+layer_weights: 1.0,1.5,0.8
+fusion_outlier_zscore: 5.0
+maximum_deviation: 200.0
+min_temp: 0
+max_temp: 300
+```
+
+### 内置策略 3:`robust_median`
 
 **算法**:加权中位数 + IQR 离群剔除
 
@@ -272,7 +333,7 @@ class FusionStrategy:
 
 **诊断输出**:`{"excluded": [...], "q1": ..., "q3": ..., "iqr": ..., "weighted_median": ...}`
 
-### 内置策略 3:`kalman`
+### 内置策略 4:`kalman`
 
 **算法**:常值状态卡尔曼滤波 + 多传感器顺序融合
 
@@ -376,6 +437,7 @@ fusion_window_size: 10
 | 场景 | 推荐 | 理由 |
 |---|---|---|
 | 12 个传感器均匀布置、读数稳定 | `weighted_mean` | 简单、可解释、计算开销最小 |
+| 多层对称布局(3 层 × 4 角)、要按层加权 | `layered_weighted_mean` | 权重从 12 个降到 3 个,语义清晰,带层内诊断 |
 | 环境存在扰动、个别传感器偶发跳变 | `robust_median` | IQR 比 MAD 更鲁棒于多离群点 |
 | 高 PID 稳定性要求、噪声大 | `kalman` | 输出平滑、有不确定度反馈 |
 | 多区域异构 | `weighted_mean` + 不同 weights | 不需要换策略,调权重即可 |
@@ -629,10 +691,11 @@ temperature_fusion chamber_fused:
 
 ```
 Available fusion strategies:
-  weighted_mean   (built-in)
-  robust_median   (built-in)
-  kalman          (built-in)
-  my_strategy     (from my_fusion_strategy)
+  kalman                 (built-in)
+  layered_weighted_mean  (built-in)
+  robust_median          (built-in)
+  weighted_mean          (built-in)
+  my_strategy            (custom)
 ```
 
 **`TEMP_FUSION_RESET`**
@@ -840,7 +903,7 @@ uv run pre-commit run --files klippy/extras/temperature_fusion.py
 | 模块形态 | `sensor_type: temperature_fusion` 工厂注册(与 `temperature_combined` 同构) |
 | 输入来源 | 仅 modbus 直读(通过 `modbus_temperature_manager`) |
 | 物理布局 | 多热区加权(每个传感器有权重/区域/位置) |
-| 融合算法 | 可插拔策略(默认 + 自定义) |
+| 融合算法 | 可插拔策略(4 内置 + 自定义) |
 | 故障模型 | 一坏即停机(保持 `temperature_combined` 安全语义) |
 | 配置接口 | 扁平列表式(逗号分隔) |
 | 实现路线 | Kalico 惯例的注册式策略插件(`register_fusion_strategy()`) |
