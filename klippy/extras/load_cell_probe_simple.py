@@ -30,10 +30,9 @@ from klippy.gcode import GCodeCommand
 
 # Q2.29 定点：与现有 load_cell_probe 模块一致
 Q2_INT_BITS = 2
-Q2_FRAC_BITS = 32 - (1 + Q2_INT_BITS)
-# 虚拟 counts_per_gram，使 MCU 端的 grams 比较等价于 counts 比较
-# grams_per_count = 1.0 / counts_per_gram = 0.5
-VIRTUAL_COUNTS_PER_GRAM = 2.0
+# 虚拟 grams_per_count = 0.5，使 MCU 端的 grams 比较等价于 counts 比较：
+#   trigger_grams = trigger_counts // 2
+#   MCU 比较 abs(delta * 0.5) >= trigger_grams  等价于  abs(delta) >= trigger_counts
 
 
 def _check_sensor_errors(results, printer):
@@ -108,18 +107,19 @@ class SimpleConfigHelper:
     def get_grams_per_count(self) -> int:
         return to_fixed_32(0.5, Q2_INT_BITS)
 
-    # 基于 sensor range 和 force_safety_limit 计算安全带
+    # 基于 sensor range 中点和 force_safety_limit 计算安全带。
+    # 用 sensor 中点作为 zero（简化版无校准基准），检查 tare 值是否
+    # 落在合理范围内——这能检测传感器上电偏置异常或外部异常拉力。
     def get_reference_safety_range(
         self, gcmd: GCodeCommand = None
     ) -> tuple[int, int]:
-        zero = self._load_cell.get_tare_counts() or 0
+        sensor_min, sensor_max = self._sensor.get_range()
         limit = self.get_safety_limit_counts(gcmd)
         if limit == 0:
-            sensor_min, sensor_max = self._sensor.get_range()
             return sensor_min, sensor_max
+        zero = (sensor_min + sensor_max) // 2
         safety_min = int(zero - limit)
         safety_max = int(zero + limit)
-        sensor_min, sensor_max = self._sensor.get_range()
         if safety_min <= sensor_min or safety_max >= sensor_max:
             raise self._printer.command_error(
                 "Load Cell Probe Error: force_safety_limit exceeds"
@@ -345,9 +345,11 @@ class SimplePrimitives:
     # MCU_endstop 接口：home_start(print_time, sample_time, sample_count,
     # rest_time, triggered=True)。简化版忽略 sample_time/sample_count/rest_time，
     # 因为触发逻辑由 MCU 端 load_cell_probe 自己管理。
+    # G28 路径：归零前先 tare（与原版 HomingMove.home_start 行为一致）。
     def home_start(
         self, print_time, sample_time, sample_count, rest_time, triggered=True
     ):
+        self.tare()
         trigger_completion = self._dispatch.start(print_time)
         self._mcu_probe.home_start(print_time)
         return trigger_completion
@@ -376,15 +378,12 @@ class SimplePrimitives:
 
     def probing_move(
         self, mcu_probe, pos, speed, gcmd: GCodeCommand
-    ) -> tuple[list[float], LoadCellSampleCollector]:
+    ) -> list[float]:
+        # 简化版不做 tap 分析，probing_move 阶段不需要持续采集样本。
+        # tare 已经在内部启动并停止了它自己的 collector，这里不再启动。
         self.tare(gcmd)
-        collector = self._start_collector()
         printer_homing: PrinterHoming = self._printer.lookup_object("homing")
-        try:
-            return printer_homing.probing_move(mcu_probe, pos, speed), collector
-        except self._printer.command_error:
-            collector.stop_collecting()
-            raise
+        return printer_homing.probing_move(mcu_probe, pos, speed)
 
     def get_status(self, eventtime):
         return {
@@ -435,7 +434,7 @@ class SimpleEndstopWrapper:
     # PrinterProbe.probing_move 调用 self.mcu_probe.probing_move(pos, speed, gcmd)
     # 返回 epos 或 (epos, is_good) 元组。简化版不做 tap 校验，is_good 恒为 True。
     def probing_move(self, pos, speed, gcmd: GCodeCommand):
-        epos, _collector = self._primitives.probing_move(self, pos, speed, gcmd)
+        epos = self._primitives.probing_move(self, pos, speed, gcmd)
         return epos, True
 
     def get_position_endstop(self):
