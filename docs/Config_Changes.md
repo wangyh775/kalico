@@ -8,6 +8,11 @@ All dates in this document are approximate.
 
 ## Changes
 
+20260723: New `temperature_fusion` virtual sensor module added. It fuses
+multiple Modbus channels into one temperature using pluggable strategies
+(weighted_mean, robust_median, kalman). This is a new module — no existing
+config is affected.
+
 20260121: Kalico now uses automatic monthly release tags in the format
 `vYYYY.MM.NN` (e.g., `v2026.01.00`). Users can configure Moonraker to track
 stable monthly releases instead of the latest commits. See

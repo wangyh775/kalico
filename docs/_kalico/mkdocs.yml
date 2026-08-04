@@ -181,6 +181,8 @@ nav:
       - mydocs/MPCV2/投影梯度下降法求解MPC问题.md
     - mydocs/串口压力传感器.md
     - mydocs/温度数据采集模块.md
+    - mydocs/temperature_fusion_design.md
     - mydocs/ExtrusionPressureControl.md
     - mydocs/Load_Cell.md
     - mydocs/巴特沃斯滤波器.md
+    - mydocs/temperature_fusion_design.md
