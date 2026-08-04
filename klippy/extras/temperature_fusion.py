@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 
 from .danger_options import get_danger_options
 
-REPORT_TIME = 1.0
+REPORT_TIME = 1.0 / 3.0
 MIN_REPORT_TIME = 0.3
 MANAGER_OBJECT_NAME = "modbus_temperature_manager"
 
