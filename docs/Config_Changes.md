@@ -12,6 +12,10 @@ All dates in this document are approximate.
 less time to complete. Previously, the command would wait the entire
 time the move could possibly take even if the endstop triggered
 earlier. Now, the command finishes shortly after the endstop trigger.
+20260723: New `temperature_fusion` virtual sensor module added. It fuses
+multiple Modbus channels into one temperature using pluggable strategies
+(weighted_mean, robust_median, kalman). This is a new module — no existing
+config is affected.
 
 20260121: Kalico now uses automatic monthly release tags in the format
 `vYYYY.MM.NN` (e.g., `v2026.01.00`). Users can configure Moonraker to track

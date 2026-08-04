@@ -1025,6 +1025,21 @@ from the config.
 If SAVE_TO_PROFILE is set to 1, the new value will be written to the
 current PID_PROFILE.
 
+#### TEMP_FUSION_STATUS
+`TEMP_FUSION_STATUS [SENSOR=<name>]`: Displays the current fused
+temperature, confidence, valid sample count, strategy diagnostics, and
+per-channel temperatures for the named fusion sensor (or the first one
+if SENSOR is omitted).
+
+#### TEMP_FUSION_LIST_STRATEGIES
+`TEMP_FUSION_LIST_STRATEGIES`: Lists all registered fusion strategies,
+marking each as built-in or custom.
+
+#### TEMP_FUSION_RESET
+`TEMP_FUSION_RESET SENSOR=<name>`: Resets the internal state of the
+named sensor's fusion strategy (e.g. Kalman covariance, sliding window).
+Useful after sensor replacement or maintenance.
+
 ### [idle_timeout]
 
 The idle_timeout module is automatically loaded.
