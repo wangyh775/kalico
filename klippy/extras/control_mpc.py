@@ -302,7 +302,8 @@ def _ekf_model_jacobian(
     F[1, 1] = (
         1.0
         - (
-            theta_3
+            theta_2
+            + theta_3
             + theta_5
             + theta_6
             + 4.0 * theta_7 * T_b_K**3
@@ -611,8 +612,9 @@ def _adjoint_backward_pass(T_s_pred, setpoint, F_list, Np, w_t, w_terminal):
             ]
         )
         dJ_dx = np.zeros(3)
-        error = T_s_pred[k + 1] - setpoint
-        dJ_dx[2] = 2.0 * w_t * error
+        if k >= 1:
+            error = T_s_pred[k] - setpoint
+            dJ_dx[2] = 2.0 * w_t * error
         lambda_curr = np.array(
             [
                 F_k[0, 0] * lambda_next[0]
@@ -719,31 +721,35 @@ def _compute_gradient_adjoint(
         T_s_pred, setpoint, F_list, Np, w_t, w_terminal
     )
     grad = np.zeros(Nc)
+    coeff = theta_8 * dt
+    # J_rate (控制变化率) 梯度 + 伴随变量跟踪梯度
+    # grad[j] = dJ_rate/du_j + lambda(j+1) . B
+    # B = [theta_8*dt, 0, 0]^T (控制输入只直接影响 T_h)
     for j in range(Nc):
-        dT_s_dP = np.zeros(Np + 1)
-        dT_s_dP[0] = 0.0
-        dT_h = 0.0
-        dT_b = 0.0
-        dT_s = 0.0
-        for k in range(Np):
-            dT_h_new = (
-                theta_1 * dt * (dT_b - dT_h)
-                + (1.0 - theta_1 * dt) * dT_h
-                + dt * theta_1
+        if Nc == 1:
+            dJ_rate_du = 2.0 * w_r * (u[0] - last_control)
+        elif j == 0:
+            dJ_rate_du = 2.0 * w_r * (
+                (u[0] - last_control) - (u[1] - u[0])
             )
-            dT_b_new = (
-                theta_2 * dt * dT_h
-                + (1.0 - (theta_3 + theta_5 + theta_6) * dt) * dT_b
-                - theta_3 * dt * dT_s
+        elif j == Nc - 1:
+            dJ_rate_du = 2.0 * w_r * (u[j] - u[j - 1])
+        else:
+            dJ_rate_du = 2.0 * w_r * (
+                (u[j] - u[j - 1]) - (u[j + 1] - u[j])
             )
-            dT_s_new = theta_4 * dt * dT_b + (1.0 - theta_4 * dt) * dT_s
-            if k >= j:
-                dT_h_new += dt * theta_1
-            dT_s_dP[k + 1] = dT_s_new
-            dT_h = dT_h_new
-            dT_b = dT_b_new
-            dT_s = dT_s_new
-        grad[j] = np.sum(lambda_list[:, 2] * dT_s_dP)
+        # 伴随变量法跟踪梯度
+        if j == Nc - 1 and Np > Nc:
+            # ZOH: u(Nc-1) 在 k=Nc-1..Np-1 持续作用
+            # grad = sum_{k=Nc}^{Np} lambda(k, 0) * coeff
+            track_grad = 0.0
+            for k in range(Nc, Np + 1):
+                track_grad += lambda_list[k, 0] * coeff
+        else:
+            # 非末段: u(j) 仅在 k=j 作用一次
+            # grad = lambda(j+1, 0) * coeff
+            track_grad = lambda_list[j + 1, 0] * coeff
+        grad[j] = dJ_rate_du + track_grad
     return grad
 
 
