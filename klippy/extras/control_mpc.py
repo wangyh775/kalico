@@ -34,6 +34,7 @@ def _numba_model_step(
     T_h,
     T_b,
     T_s,
+    d_loss,
     power,
     dt,
     T_env,
@@ -52,9 +53,9 @@ def _numba_model_step(
     c_p,
 ):
     """
-    Numba加速的单步模型仿真
+    Numba加速的单步模型仿真（支持未建模热损 d_loss）
 
-    使用前向欧拉法计算一个时间步长后的温度变化
+    使用前向欧拉法计算一个时间步长后的温度与热损变化
     """
     T_env_K = T_env + 273.15
     T_b_K = T_b + 273.15
@@ -68,12 +69,17 @@ def _numba_model_step(
     P_rad = theta_7 * (T_b_K**4 - T_env_K**4)
     P_extrusion = v_f * c_p * theta_9 * (T_b - T_filament)
 
-    dT_b = q_hb - q_bs - P_conv - P_cond - P_rad - P_extrusion
+    # d_loss 为未知热损功率(W)，乘以 theta_9 转换为对 T_b 升温速率的影响
+    dT_b = (
+        q_hb - q_bs - P_conv - P_cond - P_rad - P_extrusion - theta_9 * d_loss
+    )
     dT_s = theta_4 * (T_b - T_s)
+    dd_loss = 0.0
 
     T_h_new = T_h + dT_h * dt
     T_b_new = T_b + dT_b * dt
     T_s_new = T_s + dT_s * dt
+    d_loss_new = d_loss + dd_loss * dt
 
     if T_h_new < -50.0:
         T_h_new = -50.0
@@ -90,7 +96,12 @@ def _numba_model_step(
     elif T_s_new > 600.0:
         T_s_new = 600.0
 
-    return T_h_new, T_b_new, T_s_new
+    if d_loss_new < -100.0:
+        d_loss_new = -100.0
+    elif d_loss_new > 100.0:
+        d_loss_new = 100.0
+
+    return T_h_new, T_b_new, T_s_new, d_loss_new
 
 
 @jit(nopython=True, cache=True, fastmath=True)
@@ -98,6 +109,7 @@ def _numba_predict_trajectory(
     T_h_init,
     T_b_init,
     T_s_init,
+    d_loss_init,
     power_sequence,
     dt,
     T_env,
@@ -116,7 +128,7 @@ def _numba_predict_trajectory(
     c_p,
 ):
     """
-    Numba加速的多步预测
+    Numba加速的多步预测（包含热损 d_loss）
 
     迭代计算未来N步的温度变化
     """
@@ -124,20 +136,24 @@ def _numba_predict_trajectory(
     T_h_arr = np.zeros(n_steps + 1)
     T_b_arr = np.zeros(n_steps + 1)
     T_s_arr = np.zeros(n_steps + 1)
+    d_loss_arr = np.zeros(n_steps + 1)
 
     T_h = T_h_init
     T_b = T_b_init
     T_s = T_s_init
+    d_loss = d_loss_init
 
     T_h_arr[0] = T_h
     T_b_arr[0] = T_b
     T_s_arr[0] = T_s
+    d_loss_arr[0] = d_loss
 
     for i in range(n_steps):
-        T_h, T_b, T_s = _numba_model_step(
+        T_h, T_b, T_s, d_loss = _numba_model_step(
             T_h,
             T_b,
             T_s,
+            d_loss,
             power_sequence[i],
             dt,
             T_env,
@@ -158,8 +174,9 @@ def _numba_predict_trajectory(
         T_h_arr[i + 1] = T_h
         T_b_arr[i + 1] = T_b
         T_s_arr[i + 1] = T_s
+        d_loss_arr[i + 1] = d_loss
 
-    return T_h_arr, T_b_arr, T_s_arr
+    return T_h_arr, T_b_arr, T_s_arr, d_loss_arr
 
 
 @jit(nopython=True, cache=True, fastmath=True)
@@ -168,6 +185,7 @@ def _numba_mpc_objective(
     T_h_init,
     T_b_init,
     T_s_init,
+    d_loss_init,
     setpoint,
     dt,
     T_env,
@@ -193,22 +211,6 @@ def _numba_mpc_objective(
 ):
     """
     Numba加速的MPC目标函数计算
-
-    目标函数:
-        J = Σ w_track * (T_s[k] - T_set)² + w_terminal * (T_s[Np] - T_set)²
-            + w_rate * (u[0] - u_last)² + Σ w_rate * (u[k] - u[k-1])²
-
-    参数:
-        u: 控制序列 (长度Nc)
-        T_h_init, T_b_init, T_s_init: 初始状态
-        setpoint: 目标温度
-        w_t: 跟踪权重
-        w_terminal: 终端权重
-        w_r: 变化率权重
-        last_control: 上一次控制量
-
-    返回:
-        目标函数值
     """
     u_full = np.zeros(Np)
     for i in range(Np):
@@ -217,10 +219,11 @@ def _numba_mpc_objective(
             idx = Nc - 1
         u_full[i] = u[idx]
 
-    _, _, T_s_pred = _numba_predict_trajectory(
+    _, _, T_s_pred, _ = _numba_predict_trajectory(
         T_h_init,
         T_b_init,
         T_s_init,
+        d_loss_init,
         u_full,
         dt,
         T_env,
@@ -264,6 +267,7 @@ def _ekf_model_jacobian(
     T_h,
     T_b,
     T_s,
+    d_loss,
     power,
     dt,
     T_env,
@@ -282,9 +286,9 @@ def _ekf_model_jacobian(
     c_p,
 ):
     """
-    计算EKF状态转移矩阵的雅可比矩阵
+    计算EKF状态转移矩阵的雅可比矩阵 (4x4 扩阶版本)
 
-    状态向量: x = [T_h, T_b, T_s]
+    状态向量: x = [T_h, T_b, T_s, d_loss]
     观测向量: z = [T_s] (仅观测传感器温度)
 
     雅可比矩阵 F = df/dx，用于EKF的状态预测协方差更新
@@ -292,11 +296,12 @@ def _ekf_model_jacobian(
     T_env_K = T_env + 273.15
     T_b_K = T_b + 273.15
 
-    F = np.zeros((3, 3))
+    F = np.zeros((4, 4))
 
     F[0, 0] = 1.0 - theta_1 * dt
     F[0, 1] = theta_1 * dt
     F[0, 2] = 0.0
+    F[0, 3] = 0.0
 
     F[1, 0] = theta_2 * dt
     F[1, 1] = (
@@ -312,10 +317,17 @@ def _ekf_model_jacobian(
         * dt
     )
     F[1, 2] = -theta_3 * dt
+    F[1, 3] = -theta_9 * dt
 
     F[2, 0] = 0.0
     F[2, 1] = theta_4 * dt
     F[2, 2] = 1.0 - theta_4 * dt
+    F[2, 3] = 0.0
+
+    F[3, 0] = 0.0
+    F[3, 1] = 0.0
+    F[3, 2] = 0.0
+    F[3, 3] = 1.0
 
     return F
 
@@ -343,30 +355,15 @@ def _ekf_predict(
     c_p,
 ):
     """
-    EKF预测步骤
-
-    使用模型预测状态和协方差矩阵
-
-    参数:
-        x: 状态向量 [T_h, T_b, T_s]
-        P: 状态协方差矩阵 (3x3)
-        power: 输入功率 (W)
-        dt: 时间步长 (s)
-        T_env, T_cold, v_f, T_filament: 环境参数
-        Q: 过程噪声协方差矩阵 (3x3)
-        theta_*: 模型参数
-        c_p: 耗材热容
-
-    返回:
-        x_pred: 预测状态
-        P_pred: 预测协方差
+    EKF预测步骤 (4维)
     """
-    T_h, T_b, T_s = x[0], x[1], x[2]
+    T_h, T_b, T_s, d_loss = x[0], x[1], x[2], x[3]
 
-    T_h_new, T_b_new, T_s_new = _numba_model_step(
+    T_h_new, T_b_new, T_s_new, d_loss_new = _numba_model_step(
         T_h,
         T_b,
         T_s,
+        d_loss,
         power,
         dt,
         T_env,
@@ -385,12 +382,13 @@ def _ekf_predict(
         c_p,
     )
 
-    x_pred = np.array([T_h_new, T_b_new, T_s_new])
+    x_pred = np.array([T_h_new, T_b_new, T_s_new, d_loss_new])
 
     F = _ekf_model_jacobian(
         T_h,
         T_b,
         T_s,
+        d_loss,
         power,
         dt,
         T_env,
@@ -417,21 +415,9 @@ def _ekf_predict(
 @jit(nopython=True, cache=True, fastmath=False)
 def _ekf_update(x_pred, P_pred, z_meas, R):
     """
-    EKF更新步骤
-
-    使用观测值校正状态估计
-
-    参数:
-        x_pred: 预测状态 [T_h, T_b, T_s]
-        P_pred: 预测协方差 (3x3)
-        z_meas: 观测值 (仅T_s)
-        R: 观测噪声方差
-
-    返回:
-        x_upd: 更新后的状态
-        P_upd: 更新后的协方差
+    EKF更新步骤 (4维)
     """
-    H = np.zeros((1, 3))
+    H = np.zeros((1, 4))
     H[0, 2] = 1.0
 
     z_pred = x_pred[2]
@@ -442,11 +428,12 @@ def _ekf_update(x_pred, P_pred, z_meas, R):
 
     x_upd = x_pred + K.flatten() * y
 
-    I = np.eye(3)
+    I = np.eye(4)
     P_upd = (I - K @ H) @ P_pred
 
     for i in range(3):
         x_upd[i] = max(-50.0, min(600.0, x_upd[i]))
+    x_upd[3] = max(-100.0, min(100.0, x_upd[3]))
 
     return x_upd, P_upd
 
@@ -476,19 +463,7 @@ def _ekf_step(
     c_p,
 ):
     """
-    完整的EKF步骤：预测 + 更新
-
-    参数:
-        x: 当前状态估计 [T_h, T_b, T_s]
-        P: 当前协方差矩阵 (3x3)
-        z_meas: 传感器温度观测值
-        power: 输入功率
-        dt: 时间步长
-        其他参数: 模型和噪声参数
-
-    返回:
-        x_new: 更新后的状态估计
-        P_new: 更新后的协方差矩阵
+    完整的EKF步骤：预测 + 更新 (4维)
     """
     x_pred, P_pred = _ekf_predict(
         x,
@@ -528,6 +503,7 @@ def _compute_jacobian_list(
     T_h_init,
     T_b_init,
     T_s_init,
+    d_loss_init,
     u,
     dt,
     T_env,
@@ -546,15 +522,17 @@ def _compute_jacobian_list(
     c_p,
     Np,
 ):
-    F_list = np.zeros((Np, 3, 3))
+    F_list = np.zeros((Np, 4, 4))
     T_h = T_h_init
     T_b = T_b_init
     T_s = T_s_init
+    d_loss = d_loss_init
     for k in range(Np):
         F = _ekf_model_jacobian(
             T_h,
             T_b,
             T_s,
+            d_loss,
             u[min(k, len(u) - 1)],
             dt,
             T_env,
@@ -573,10 +551,11 @@ def _compute_jacobian_list(
             c_p,
         )
         F_list[k] = F
-        T_h, T_b, T_s = _numba_model_step(
+        T_h, T_b, T_s, d_loss = _numba_model_step(
             T_h,
             T_b,
             T_s,
+            d_loss,
             u[min(k, len(u) - 1)],
             dt,
             T_env,
@@ -599,7 +578,7 @@ def _compute_jacobian_list(
 
 @jit(nopython=True, cache=True, fastmath=True)
 def _adjoint_backward_pass(T_s_pred, setpoint, F_list, Np, w_t, w_terminal):
-    lambda_list = np.zeros((Np + 1, 3))
+    lambda_list = np.zeros((Np + 1, 4))
     error_Np = T_s_pred[Np] - setpoint
     lambda_list[Np, 2] = 2.0 * (w_t + w_terminal) * error_Np
     for k in range(Np - 1, -1, -1):
@@ -609,9 +588,10 @@ def _adjoint_backward_pass(T_s_pred, setpoint, F_list, Np, w_t, w_terminal):
                 lambda_list[k + 1, 0],
                 lambda_list[k + 1, 1],
                 lambda_list[k + 1, 2],
+                lambda_list[k + 1, 3],
             ]
         )
-        dJ_dx = np.zeros(3)
+        dJ_dx = np.zeros(4)
         if k >= 1:
             error = T_s_pred[k] - setpoint
             dJ_dx[2] = 2.0 * w_t * error
@@ -620,15 +600,23 @@ def _adjoint_backward_pass(T_s_pred, setpoint, F_list, Np, w_t, w_terminal):
                 F_k[0, 0] * lambda_next[0]
                 + F_k[1, 0] * lambda_next[1]
                 + F_k[2, 0] * lambda_next[2]
+                + F_k[3, 0] * lambda_next[3]
                 + dJ_dx[0],
                 F_k[0, 1] * lambda_next[0]
                 + F_k[1, 1] * lambda_next[1]
                 + F_k[2, 1] * lambda_next[2]
+                + F_k[3, 1] * lambda_next[3]
                 + dJ_dx[1],
                 F_k[0, 2] * lambda_next[0]
                 + F_k[1, 2] * lambda_next[1]
                 + F_k[2, 2] * lambda_next[2]
+                + F_k[3, 2] * lambda_next[3]
                 + dJ_dx[2],
+                F_k[0, 3] * lambda_next[0]
+                + F_k[1, 3] * lambda_next[1]
+                + F_k[2, 3] * lambda_next[2]
+                + F_k[3, 3] * lambda_next[3]
+                + dJ_dx[3],
             ]
         )
         lambda_list[k] = lambda_curr
@@ -640,6 +628,7 @@ def _compute_gradient_adjoint(
     T_h,
     T_b,
     T_s,
+    d_loss,
     u,
     setpoint,
     dt,
@@ -667,14 +656,17 @@ def _compute_gradient_adjoint(
     T_h_pred = np.zeros(Np + 1)
     T_b_pred = np.zeros(Np + 1)
     T_s_pred = np.zeros(Np + 1)
+    d_loss_pred = np.zeros(Np + 1)
     T_h_pred[0] = T_h
     T_b_pred[0] = T_b
     T_s_pred[0] = T_s
+    d_loss_pred[0] = d_loss
     for k in range(Np):
-        T_h, T_b, T_s = _numba_model_step(
+        T_h, T_b, T_s, d_loss = _numba_model_step(
             T_h,
             T_b,
             T_s,
+            d_loss,
             u[min(k, len(u) - 1)],
             dt,
             T_env,
@@ -695,10 +687,12 @@ def _compute_gradient_adjoint(
         T_h_pred[k + 1] = T_h
         T_b_pred[k + 1] = T_b
         T_s_pred[k + 1] = T_s
+        d_loss_pred[k + 1] = d_loss
     F_list = _compute_jacobian_list(
         T_h_pred[0],
         T_b_pred[0],
         T_s_pred[0],
+        d_loss_pred[0],
         u,
         dt,
         T_env,
@@ -722,32 +716,20 @@ def _compute_gradient_adjoint(
     )
     grad = np.zeros(Nc)
     coeff = theta_8 * dt
-    # J_rate (控制变化率) 梯度 + 伴随变量跟踪梯度
-    # grad[j] = dJ_rate/du_j + lambda(j+1) . B
-    # B = [theta_8*dt, 0, 0]^T (控制输入只直接影响 T_h)
     for j in range(Nc):
         if Nc == 1:
             dJ_rate_du = 2.0 * w_r * (u[0] - last_control)
         elif j == 0:
-            dJ_rate_du = 2.0 * w_r * (
-                (u[0] - last_control) - (u[1] - u[0])
-            )
+            dJ_rate_du = 2.0 * w_r * ((u[0] - last_control) - (u[1] - u[0]))
         elif j == Nc - 1:
             dJ_rate_du = 2.0 * w_r * (u[j] - u[j - 1])
         else:
-            dJ_rate_du = 2.0 * w_r * (
-                (u[j] - u[j - 1]) - (u[j + 1] - u[j])
-            )
-        # 伴随变量法跟踪梯度
+            dJ_rate_du = 2.0 * w_r * ((u[j] - u[j - 1]) - (u[j + 1] - u[j]))
         if j == Nc - 1 and Np > Nc:
-            # ZOH: u(Nc-1) 在 k=Nc-1..Np-1 持续作用
-            # grad = sum_{k=Nc}^{Np} lambda(k, 0) * coeff
             track_grad = 0.0
             for k in range(Nc, Np + 1):
                 track_grad += lambda_list[k, 0] * coeff
         else:
-            # 非末段: u(j) 仅在 k=j 作用一次
-            # grad = lambda(j+1, 0) * coeff
             track_grad = lambda_list[j + 1, 0] * coeff
         grad[j] = dJ_rate_du + track_grad
     return grad
@@ -758,6 +740,7 @@ def _compute_gradient(
     T_h,
     T_b,
     T_s,
+    d_loss,
     u,
     setpoint,
     dt,
@@ -786,6 +769,7 @@ def _compute_gradient(
         T_h,
         T_b,
         T_s,
+        d_loss,
         u,
         setpoint,
         dt,
@@ -839,6 +823,7 @@ def _line_search(
     T_h,
     T_b,
     T_s,
+    d_loss,
     u,
     grad,
     setpoint,
@@ -869,18 +854,6 @@ def _line_search(
 ):
     """
     回溯线搜索
-
-    使用Armijo条件确定步长
-
-    参数:
-        u: 当前控制序列
-        grad: 梯度方向
-        alpha_init: 初始步长
-        rho: 步长衰减因子
-        c1: Armijo条件参数
-
-    返回:
-        alpha: 满足条件的步长
     """
     alpha = alpha_init
 
@@ -889,6 +862,7 @@ def _line_search(
         T_h,
         T_b,
         T_s,
+        d_loss,
         setpoint,
         dt,
         T_env,
@@ -926,6 +900,7 @@ def _line_search(
             T_h,
             T_b,
             T_s,
+            d_loss,
             setpoint,
             dt,
             T_env,
@@ -963,6 +938,7 @@ def _solve_mpc_pgd(
     T_h,
     T_b,
     T_s,
+    d_loss,
     setpoint,
     dt,
     T_env,
@@ -992,23 +968,7 @@ def _solve_mpc_pgd(
     u_init,
 ):
     """
-    投影梯度下降法求解MPC问题
-
-    使用回溯线搜索和投影操作求解带约束的MPC优化问题
-    结合最优解追踪策略，确保返回历史最优解
-
-    参数:
-        T_h, T_b, T_s: 初始状态
-        setpoint: 目标温度
-        max_power, min_power: 功率约束
-        max_iter: 最大迭代次数
-        tol: 收敛容差
-        u_init: 初始控制序列
-
-    返回:
-        u_opt: 最优控制序列
-        converged: 是否收敛
-        iterations: 实际迭代次数
+    投影梯度下降法求解MPC问题 (包含未建模热损 d_loss)
     """
     u = u_init.copy()
 
@@ -1024,6 +984,7 @@ def _solve_mpc_pgd(
         T_h,
         T_b,
         T_s,
+        d_loss,
         setpoint,
         dt,
         T_env,
@@ -1056,6 +1017,7 @@ def _solve_mpc_pgd(
             T_h,
             T_b,
             T_s,
+            d_loss,
             u,
             setpoint,
             dt,
@@ -1094,6 +1056,7 @@ def _solve_mpc_pgd(
             T_h,
             T_b,
             T_s,
+            d_loss,
             u,
             grad,
             setpoint,
@@ -1132,6 +1095,7 @@ def _solve_mpc_pgd(
             T_h,
             T_b,
             T_s,
+            d_loss,
             setpoint,
             dt,
             T_env,
@@ -1178,6 +1142,7 @@ def _batch_predict_trajectories(
     T_h,
     T_b,
     T_s,
+    d_loss,
     u_candidates,
     dt,
     T_env,
@@ -1197,15 +1162,7 @@ def _batch_predict_trajectories(
     Np,
 ):
     """
-    批量预测多条轨迹
-
-    用于并行评估多个候选控制序列
-
-    参数:
-        u_candidates: 候选控制序列数组 (n_candidates, Np)
-
-    返回:
-        T_s_final: 每条轨迹的最终传感器温度 (n_candidates,)
+    批量预测多条轨迹（包含热损 d_loss）
     """
     n_candidates = u_candidates.shape[0]
     T_s_final = np.zeros(n_candidates)
@@ -1214,12 +1171,14 @@ def _batch_predict_trajectories(
         T_h_cur = T_h
         T_b_cur = T_b
         T_s_cur = T_s
+        d_loss_cur = d_loss
 
         for i in range(Np):
-            T_h_cur, T_b_cur, T_s_cur = _numba_model_step(
+            T_h_cur, T_b_cur, T_s_cur, d_loss_cur = _numba_model_step(
                 T_h_cur,
                 T_b_cur,
                 T_s_cur,
+                d_loss_cur,
                 u_candidates[k, i],
                 dt,
                 T_env,
@@ -2155,6 +2114,7 @@ class ControlMPCV2:
         self.state_sensor_temp_v2 = self.state_heater_temp_v2
         self.state_ambient_temp_v2 = AMBIENT_TEMP
         self.state_cold_temp_v2 = AMBIENT_TEMP
+        self.state_d_loss_v2 = 0.0  # 未知热损功率估计 (W)
 
         # 功率和损耗记录
         self.last_power_v2 = 0.0
@@ -2187,32 +2147,37 @@ class ControlMPCV2:
 
         # =====================================================================
         # EKF状态估计器初始化
-        # Extended Kalman Filter Initialization
+        # Extended Kalman Filter Initialization (4-D Offset-Free EKF)
         # =====================================================================
 
-        # EKF状态向量: x = [T_h, T_b, T_s]
+        # EKF状态向量: x = [T_h, T_b, T_s, d_loss]
         self.ekf_state_v2 = np.array(
             [
                 self.state_heater_temp_v2,
                 self.state_block_temp_v2,
                 self.state_sensor_temp_v2,
+                0.0,  # 未知热损功率估计 (W)
             ]
         )
 
         # EKF协方差矩阵初始化
-        # P_0: 初始协方差，表示初始状态的不确定性
-        self.ekf_P_v2 = np.eye(3) * 10.0  # 初始方差10°C²
+        # P_0: 4x4 初始协方差，包含对 d_loss 的初始估计不确定度
+        self.ekf_P_v2 = np.diag([10.0, 10.0, 10.0, 10.0])
 
         # EKF噪声参数
-        # Q: 过程噪声协方差矩阵，反映模型不确定性
-        # R: 观测噪声方差，反映传感器精度
-        self.ekf_Q_v2 = np.eye(3) * 0.1  # 过程噪声
-        self.ekf_R_v2 = np.array([[0.25]])  # 观测噪声 (0.5°C标准差)
+        # Q: 4x4 过程噪声协方差矩阵，Q_temp 控制温度节点噪声，Q_dist 控制热损估计响应速度
+        # R: 1x1 观测噪声方差
+        Q_temp = self.profile_v2.get("ekf_Q_temp", 1e-3)
+        Q_dist = self.profile_v2.get("ekf_Q_dist", 5e-3)
+        self.ekf_Q_v2 = np.diag([Q_temp, Q_temp, Q_temp, Q_dist])
+
+        R_val = self.profile_v2.get("ekf_R_sensor", 0.04)
+        self.ekf_R_v2 = np.array([[R_val]])
 
         # EKF配置参数
         self.ekf_enabled_v2 = True  # EKF使能标志
-        self.ekf_Q_scale_v2 = 0.1  # 过程噪声缩放因子
-        self.ekf_R_scale_v2 = 0.25  # 观测噪声缩放因子
+        self.ekf_Q_scale_v2 = Q_dist  # 扰动过程噪声标度
+        self.ekf_R_scale_v2 = R_val  # 观测噪声标度
 
         # =====================================================================
         # 内存预分配 - 热启动优化
@@ -2407,8 +2372,11 @@ class ControlMPCV2:
 
         # EKF参数配置
         self.ekf_enabled_v2 = self.profile_v2.get("ekf_enabled", True)
-        self.ekf_Q_scale_v2 = self.profile_v2.get("ekf_Q_scale", 0.1)
-        self.ekf_R_scale_v2 = self.profile_v2.get("ekf_R_scale", 0.25)
+        self.ekf_Q_temp_v2 = self.profile_v2.get("ekf_Q_temp", 1e-3)
+        self.ekf_Q_dist_v2 = self.profile_v2.get("ekf_Q_dist", 5e-3)
+        self.ekf_R_sensor_v2 = self.profile_v2.get("ekf_R_sensor", 0.04)
+        self.ekf_Q_scale_v2 = self.ekf_Q_dist_v2
+        self.ekf_R_scale_v2 = self.ekf_R_sensor_v2
 
         # PGD求解器参数
         self.pgd_max_iterations_v2 = self.profile_v2.get(
@@ -2457,11 +2425,9 @@ class ControlMPCV2:
     def _warmup_numba(self):
         """
         Numba 预热 - 触发 JIT 编译以避免首次调用的延迟
-
-        在控制器初始化时调用，确保所有 Numba 加速函数已编译完成，
-        避免在首次控制循环时因 JIT 编译导致控制延迟。
         """
         _numba_model_step(
+            0.0,
             0.0,
             0.0,
             0.0,
@@ -2507,35 +2473,19 @@ class ControlMPCV2:
         )
 
     def _model_step_v2(
-        self, T_h, T_b, T_s, power, dt, T_env, T_cold, v_f, T_filament
+        self, T_h, T_b, T_s, d_loss, power, dt, T_env, T_cold, v_f, T_filament
     ):
         """
-        单步模型仿真 - 使用前向欧拉法
-
-        基于三节点热力学模型计算一个时间步长后的温度变化
-        优先使用Numba加速版本，回退到纯Python版本
-
-        参数:
-            T_h: 当前加热器温度 (°C)
-            T_b: 当前加热块温度 (°C)
-            T_s: 当前传感器温度 (°C)
-            power: 加热功率 (W)
-            dt: 时间步长 (s)
-            T_env: 环境温度 (°C)
-            T_cold: 冷端温度 (°C)
-            v_f: 挤出速率 (mm³/s)
-            T_filament: 耗材温度 (°C)
-
-        返回:
-            (T_h_new, T_b_new, T_s_new): 更新后的温度元组
+        单步模型仿真 - 使用前向欧拉法 (支持 d_loss)
         """
         t_start = time.perf_counter()
 
         if self.numba_enabled_v2:
-            T_h_new, T_b_new, T_s_new = _numba_model_step(
+            T_h_new, T_b_new, T_s_new, d_loss_new = _numba_model_step(
                 T_h,
                 T_b,
                 T_s,
+                d_loss,
                 power,
                 dt,
                 T_env,
@@ -2569,52 +2519,46 @@ class ControlMPCV2:
             P_rad = self.const_theta_7_v2 * (T_b_K**4 - T_env_K**4)
             P_extrusion = v_f * c_p * self.const_theta_9_v2 * (T_b - T_filament)
 
-            dT_b = q_hb - q_bs - P_conv - P_cond - P_rad - P_extrusion
+            dT_b = (
+                q_hb
+                - q_bs
+                - P_conv
+                - P_cond
+                - P_rad
+                - P_extrusion
+                - self.const_theta_9_v2 * d_loss
+            )
             dT_s = self.const_theta_4_v2 * (T_b - T_s)
+            dd_loss = 0.0
 
             T_h_new = T_h + dT_h * dt
             T_b_new = T_b + dT_b * dt
             T_s_new = T_s + dT_s * dt
+            d_loss_new = d_loss + dd_loss * dt
 
             T_h_new = max(-50.0, min(600.0, T_h_new))
             T_b_new = max(-50.0, min(600.0, T_b_new))
             T_s_new = max(-50.0, min(600.0, T_s_new))
+            d_loss_new = max(-100.0, min(100.0, d_loss_new))
 
         self.timing_model_step_v2 = (time.perf_counter() - t_start) * 1000.0
 
-        return T_h_new, T_b_new, T_s_new
+        return T_h_new, T_b_new, T_s_new, d_loss_new
 
     def _predict_trajectory_v2(
         self, initial_state, power_sequence, dt, T_env, T_cold, v_f, T_filament
     ):
         """
-        多步预测 - 预测未来温度轨迹
-
-        使用模型迭代计算未来N步的温度变化，用于MPC优化
-        优先使用Numba加速版本，回退到纯Python版本
-
-        参数:
-            initial_state: 初始状态字典 {'T_h', 'T_b', 'T_s'}
-            power_sequence: 功率序列数组 (W)，长度为预测步数
-            dt: 时间步长 (s)
-            T_env: 环境温度 (°C)
-            T_cold: 冷端温度 (°C)
-            v_f: 挤出速率 (mm³/s)
-            T_filament: 耗材温度 (°C)
-
-        返回:
-            (T_h_arr, T_b_arr, T_s_arr): 温度轨迹数组，长度为 n_steps + 1
-                - T_h_arr: 加热器温度轨迹
-                - T_b_arr: 加热块温度轨迹
-                - T_s_arr: 传感器温度轨迹
+        多步预测 - 预测未来温度轨迹 (包含 d_loss)
         """
         t_start = time.perf_counter()
 
         if self.numba_enabled_v2:
-            T_h_arr, T_b_arr, T_s_arr = _numba_predict_trajectory(
+            T_h_arr, T_b_arr, T_s_arr, d_loss_arr = _numba_predict_trajectory(
                 initial_state["T_h"],
                 initial_state["T_b"],
                 initial_state["T_s"],
+                initial_state.get("d_loss", 0.0),
                 power_sequence,
                 dt,
                 T_env,
@@ -2637,20 +2581,24 @@ class ControlMPCV2:
             T_h_arr = np.zeros(n_steps + 1)
             T_b_arr = np.zeros(n_steps + 1)
             T_s_arr = np.zeros(n_steps + 1)
+            d_loss_arr = np.zeros(n_steps + 1)
 
             T_h = initial_state["T_h"]
             T_b = initial_state["T_b"]
             T_s = initial_state["T_s"]
+            d_loss = initial_state.get("d_loss", 0.0)
 
             T_h_arr[0] = T_h
             T_b_arr[0] = T_b
             T_s_arr[0] = T_s
+            d_loss_arr[0] = d_loss
 
             for i in range(n_steps):
-                T_h, T_b, T_s = self._model_step_v2(
+                T_h, T_b, T_s, d_loss = self._model_step_v2(
                     T_h,
                     T_b,
                     T_s,
+                    d_loss,
                     power_sequence[i],
                     dt,
                     T_env,
@@ -2661,10 +2609,11 @@ class ControlMPCV2:
                 T_h_arr[i + 1] = T_h
                 T_b_arr[i + 1] = T_b
                 T_s_arr[i + 1] = T_s
+                d_loss_arr[i + 1] = d_loss
 
         self.timing_predict_v2 = (time.perf_counter() - t_start) * 1000.0
 
-        return T_h_arr, T_b_arr, T_s_arr
+        return T_h_arr, T_b_arr, T_s_arr, d_loss_arr
 
     def _mpc_objective_v2(
         self, u, initial_state, setpoint, dt, T_env, T_cold, v_f, T_filament
@@ -2702,6 +2651,7 @@ class ControlMPCV2:
                 initial_state["T_h"],
                 initial_state["T_b"],
                 initial_state["T_s"],
+                initial_state.get("d_loss", 0.0),
                 setpoint,
                 dt,
                 T_env,
@@ -2730,7 +2680,7 @@ class ControlMPCV2:
         for i in range(Np):
             u_full[i] = u[min(i, Nc - 1)]
 
-        _, _, T_s_pred = self._predict_trajectory_v2(
+        _, _, T_s_pred, _ = self._predict_trajectory_v2(
             initial_state, u_full, dt, T_env, T_cold, v_f, T_filament
         )
 
@@ -2925,8 +2875,15 @@ class ControlMPCV2:
         t_model_step_start = time.perf_counter()
 
         if self.ekf_enabled_v2 and self.numba_enabled_v2:
-            self.ekf_Q_v2 = np.eye(3) * self.ekf_Q_scale_v2
-            self.ekf_R_v2 = np.array([[self.ekf_R_scale_v2]])
+            self.ekf_Q_v2 = np.diag(
+                [
+                    self.ekf_Q_temp_v2,
+                    self.ekf_Q_temp_v2,
+                    self.ekf_Q_temp_v2,
+                    self.ekf_Q_dist_v2,
+                ]
+            )
+            self.ekf_R_v2 = np.array([[self.ekf_R_sensor_v2]])
 
             x_new, P_new = _ekf_step(
                 self.ekf_state_v2,
@@ -2962,16 +2919,19 @@ class ControlMPCV2:
             self.state_heater_temp_v2 = x_new[0]
             self.state_block_temp_v2 = x_new[1]
             self.state_sensor_temp_v2 = x_new[2]
+            self.state_d_loss_v2 = x_new[3]
         else:
             T_h = self.state_heater_temp_v2
             T_b = self.state_block_temp_v2
             T_s = self.state_sensor_temp_v2
+            d_loss = self.state_d_loss_v2
 
             power = self.last_power_v2
-            T_h_new, T_b_new, T_s_new = self._model_step_v2(
+            T_h_new, T_b_new, T_s_new, d_loss_new = self._model_step_v2(
                 T_h,
                 T_b,
                 T_s,
+                d_loss,
                 power,
                 dt,
                 T_env,
@@ -2983,6 +2943,7 @@ class ControlMPCV2:
             self.state_heater_temp_v2 = T_h_new
             self.state_block_temp_v2 = T_b_new
             self.state_sensor_temp_v2 = T_s_new
+            self.state_d_loss_v2 = d_loss_new
 
             smoothing = 1 - (1 - self.const_smoothing_v2) ** dt
             adjustment_dT = (temp - self.state_sensor_temp_v2) * smoothing
@@ -3031,6 +2992,7 @@ class ControlMPCV2:
                     self.state_heater_temp_v2,
                     self.state_block_temp_v2,
                     self.state_sensor_temp_v2,
+                    self.state_d_loss_v2,
                     target_temp,
                     dt,
                     self.state_ambient_temp_v2,
@@ -3077,6 +3039,7 @@ class ControlMPCV2:
                     "T_h": self.state_heater_temp_v2,
                     "T_b": self.state_block_temp_v2,
                     "T_s": self.state_sensor_temp_v2,
+                    "d_loss": self.state_d_loss_v2,
                 }
 
                 power = self._solve_mpc_v2(
@@ -3215,6 +3178,7 @@ class ControlMPCV2:
             "temp_sensor": self.state_sensor_temp_v2,
             "temp_ambient": self.state_ambient_temp_v2,
             "temp_cold": self.state_cold_temp_v2,
+            "d_loss": self.state_d_loss_v2,
             "power": self.last_power_v2,
             "loss_ambient": self.last_loss_ambient_v2,
             "loss_filament": self.last_loss_filament_v2,
@@ -3241,13 +3205,16 @@ class ControlMPCV2:
             "ekf_T_h": float(self.ekf_state_v2[0]),
             "ekf_T_b": float(self.ekf_state_v2[1]),
             "ekf_T_s": float(self.ekf_state_v2[2]),
+            "ekf_d_loss": float(self.ekf_state_v2[3]),
             "ekf_P_diag": [
                 float(self.ekf_P_v2[0, 0]),
                 float(self.ekf_P_v2[1, 1]),
                 float(self.ekf_P_v2[2, 2]),
+                float(self.ekf_P_v2[3, 3]),
             ],
-            "ekf_Q_scale": self.ekf_Q_scale_v2,
-            "ekf_R_scale": self.ekf_R_scale_v2,
+            "ekf_Q_temp": self.ekf_Q_temp_v2,
+            "ekf_Q_dist": self.ekf_Q_dist_v2,
+            "ekf_R_sensor": self.ekf_R_sensor_v2,
             "pgd_iterations": self.pgd_iterations_v2,
             "pgd_converged": self.pgd_converged_v2,
             "hot_start_available": self._hot_start_available_v2,
@@ -3291,6 +3258,7 @@ def run_performance_benchmark(n_iterations=100):
     c_p = 0.00259
 
     T_h, T_b, T_s = 200.0, 195.0, 190.0
+    d_loss = 0.0
     power = 30.0
     dt = 0.1
     T_env, T_cold = 25.0, 25.0
@@ -3306,6 +3274,7 @@ def run_performance_benchmark(n_iterations=100):
             T_h,
             T_b,
             T_s,
+            d_loss,
             power,
             dt,
             T_env,
@@ -3330,6 +3299,7 @@ def run_performance_benchmark(n_iterations=100):
                 T_h,
                 T_b,
                 T_s,
+                d_loss,
                 power,
                 dt,
                 T_env,
@@ -3357,6 +3327,7 @@ def run_performance_benchmark(n_iterations=100):
             T_h,
             T_b,
             T_s,
+            d_loss,
             200.0,
             dt,
             T_env,
@@ -3388,6 +3359,7 @@ def run_performance_benchmark(n_iterations=100):
                 T_h,
                 T_b,
                 T_s,
+                d_loss,
                 200.0,
                 dt,
                 T_env,
@@ -3414,10 +3386,10 @@ def run_performance_benchmark(n_iterations=100):
         t_end = time_module.perf_counter()
         results["mpc_objective_numba"] = (t_end - t_start) / n_iterations * 1000
 
-        x_ekf = np.array([T_h, T_b, T_s])
-        P_ekf = np.eye(3) * 10.0
-        Q_ekf = np.eye(3) * 0.1
-        R_ekf = np.array([[0.25]])
+        x_ekf = np.array([T_h, T_b, T_s, 0.0])
+        P_ekf = np.diag([10.0, 10.0, 10.0, 10.0])
+        Q_ekf = np.diag([1e-3, 1e-3, 1e-3, 5e-3])
+        R_ekf = np.array([[0.04]])
 
         _ekf_step(
             x_ekf,
@@ -3478,6 +3450,7 @@ def run_performance_benchmark(n_iterations=100):
             T_h,
             T_b,
             T_s,
+            d_loss,
             200.0,
             dt,
             T_env,
@@ -3516,6 +3489,7 @@ def run_performance_benchmark(n_iterations=100):
             T_h,
             T_b,
             T_s,
+            d_loss,
             200.0,
             dt,
             T_env,
