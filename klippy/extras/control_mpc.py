@@ -1557,10 +1557,6 @@ class ControlMPC:
             "filament_temp": self.filament_temp_src,
             "filament_heat_capacity": self.const_filament_heat_capacity,
             "filament_density": self.const_filament_density,
-            "prediction_horizon": self.const_prediction_horizon,
-            "control_horizon": self.const_control_horizon,
-            "weight_tracking": self.const_weight_tracking,
-            "weight_rate": self.const_weight_rate,
         }
 
 
