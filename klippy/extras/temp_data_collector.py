@@ -319,15 +319,19 @@ class TemperatureDataCollector:
         control_params = self._build_control_params_summary(eventtime)
 
         # 通用物理挤出速度计算 (适用于 PID, MPC v1, MPC v2 等所有控制器)
+        # 注意: find_past_position 需要 print_time (MCU 时间基准)，
+        # 必须用 mcu.estimated_print_time() 把 reactor eventtime 转换过去
         v_f_calc = 0.0
         try:
             toolhead = self.printer.lookup_object("toolhead", None)
-            if toolhead is not None:
+            mcu = self.printer.lookup_object("mcu", None)
+            if toolhead is not None and mcu is not None:
                 extruder = toolhead.get_extruder()
                 if hasattr(extruder, "find_past_position"):
+                    est_print_time = mcu.estimated_print_time(eventtime)
                     dt = 1.0 / self.default_sample_rate
-                    pos_curr = extruder.find_past_position(eventtime)
-                    pos_prev = extruder.find_past_position(eventtime - dt)
+                    pos_curr = extruder.find_past_position(est_print_time)
+                    pos_prev = extruder.find_past_position(est_print_time - dt)
                     v_f_calc = max(0.0, (pos_curr - pos_prev) / dt)
         except Exception:
             pass
@@ -441,12 +445,50 @@ class TemperatureDataCollector:
             self.reactor.unregister_timer(self.sample_timer)
             self.sample_timer = None
 
+    def _auto_annotate_extrusion_phase(self):
+        """
+        根据 v_f 挤出速度自动标注 phase 列 (pre_extrusion/extruding/post_extrusion)
+
+        与控制器类型无关 (PID / MPC v1 / MPC v2 均有效)。
+        若数据中已存在手动 TEMP_DATA_SET_PHASE 标注则不覆盖。
+        """
+        with self.collection_lock:
+            if not self.data_buffer:
+                return
+            # 已有手动标注时跳过
+            if any(
+                s.get("phase", "heating") not in ("heating", "")
+                for s in self.data_buffer
+            ):
+                return
+            # 检测 v_f 超过阈值的样本窗口
+            thresh = 0.5
+            extruding_idx = [
+                i
+                for i, s in enumerate(self.data_buffer)
+                if s.get("v_f", 0.0) > thresh
+            ]
+            if not extruding_idx:
+                return
+            first, last = extruding_idx[0], extruding_idx[-1]
+            for i, s in enumerate(self.data_buffer):
+                if i < first:
+                    s["phase"] = "pre_extrusion"
+                elif i <= last:
+                    s["phase"] = "extruding"
+                else:
+                    s["phase"] = "post_extrusion"
+
     def _save_data_to_csv(self, filename):
         """
         将 22 维全量字段保存到 CSV 文件
         """
         if not self.data_buffer:
             return False
+
+        # 挤出扰动实验：基于 v_f 自动标注挤出阶段（若未手动标注）
+        if self.current_experiment == "extrusion_disturbance":
+            self._auto_annotate_extrusion_phase()
 
         filepath = os.path.join(self.data_dir, filename)
         try:
