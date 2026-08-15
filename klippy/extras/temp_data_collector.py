@@ -210,7 +210,7 @@ class TemperatureDataCollector:
                 prof = {}
 
             ctype = self._detect_control_type()
-            if ctype in ("mpc_v2", "mpc"):
+            if ctype == "mpc_v2":
                 np_val = st.get("prediction_horizon", prof.get("prediction_horizon", ""))
                 nc_val = st.get("control_horizon", prof.get("control_horizon", ""))
                 wt_val = st.get("weight_tracking", prof.get("weight_tracking", ""))
@@ -220,6 +220,15 @@ class TemperatureDataCollector:
                     f"Nc={nc_val},"
                     f"wt={wt_val},"
                     f"wr={wr_val}"
+                )
+            elif ctype == "mpc":
+                cb = st.get("block_heat_capacity", prof.get("block_heat_capacity", ""))
+                sr = st.get("sensor_responsiveness", prof.get("sensor_responsiveness", ""))
+                at = st.get("ambient_transfer", prof.get("ambient_transfer", ""))
+                return (
+                    f"Cb={cb},"
+                    f"alpha_s={sr},"
+                    f"h_amb={at}"
                 )
             elif "pid" in ctype or ctype == "unknown":
                 kp = st.get("Kp", getattr(ctrl, "Kp", prof.get("pid_kp", 0)))

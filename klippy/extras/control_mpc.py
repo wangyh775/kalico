@@ -1217,6 +1217,7 @@ class ControlMPC:
         self.state_ambient_temp = AMBIENT_TEMP
 
         self.last_power = 0.0
+        self.last_extrude_speed = 0.0
         self.last_loss_ambient = 0.0
         self.last_loss_filament = 0.0
         self.last_time = 0.0
@@ -1389,6 +1390,7 @@ class ControlMPC:
                     pos_next = extruder.find_past_position(read_time + dt)
                     pos_move = max(-self.const_maximum_retract, pos_next - pos)
                     extrude_speed_next = pos_move / dt
+        self.last_extrude_speed = extrude_speed_prev
 
         # Modulate ambient transfer coefficient with fan speed
         ambient_transfer = self.const_ambient_transfer
@@ -1552,11 +1554,16 @@ class ControlMPC:
             "temp_sensor": self.state_sensor_temp,
             "temp_ambient": self.state_ambient_temp,
             "power": self.last_power,
+            "extrude_speed": self.last_extrude_speed,
+            "v_f": self.last_extrude_speed,
             "loss_ambient": self.last_loss_ambient,
             "loss_filament": self.last_loss_filament,
             "filament_temp": self.filament_temp_src,
             "filament_heat_capacity": self.const_filament_heat_capacity,
             "filament_density": self.const_filament_density,
+            "block_heat_capacity": self.const_block_heat_capacity,
+            "sensor_responsiveness": self.const_sensor_responsiveness,
+            "ambient_transfer": self.const_ambient_transfer,
         }
 
 
