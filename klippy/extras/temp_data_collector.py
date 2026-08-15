@@ -131,6 +131,11 @@ class TemperatureDataCollector:
             desc=self.cmd_TEMP_DATA_STATUS_help,
         )
         self.gcode.register_command(
+            "TEMP_DATA_SET_PHASE",
+            self.cmd_TEMP_DATA_SET_PHASE,
+            desc=self.cmd_TEMP_DATA_SET_PHASE_help,
+        )
+        self.gcode.register_command(
             "THERMAL_ID_CALIBRATE",
             self.cmd_THERMAL_ID_CALIBRATE,
             desc=self.cmd_THERMAL_ID_CALIBRATE_help,
@@ -304,6 +309,20 @@ class TemperatureDataCollector:
         control_type = self._detect_control_type()
         control_params = self._build_control_params_summary(eventtime)
 
+        # 通用物理挤出速度计算 (适用于 PID, MPC v1, MPC v2 等所有控制器)
+        v_f_calc = 0.0
+        try:
+            toolhead = self.printer.lookup_object("toolhead", None)
+            if toolhead is not None:
+                extruder = toolhead.get_extruder()
+                if hasattr(extruder, "find_past_position"):
+                    dt = 1.0 / self.default_sample_rate
+                    pos_curr = extruder.find_past_position(eventtime)
+                    pos_prev = extruder.find_past_position(eventtime - dt)
+                    v_f_calc = max(0.0, (pos_curr - pos_prev) / dt)
+        except Exception:
+            pass
+
         sample = {
             "time": eventtime,
             "temperature": temp,
@@ -324,7 +343,7 @@ class TemperatureDataCollector:
             "loss_cold": 0.0,
             "loss_radiation": 0.0,
             "loss_filament": 0.0,
-            "v_f": 0.0,
+            "v_f": v_f_calc,
             "fan_speed": 0.0,
             "timing_total": 0.0,
             "pgd_iterations": 0,
@@ -356,7 +375,9 @@ class TemperatureDataCollector:
                     sample["loss_radiation"] = st.get("loss_radiation", 0.0)
                     sample["loss_filament"] = st.get("loss_filament", 0.0)
 
-                    sample["v_f"] = st.get("extrude_speed", st.get("v_f", 0.0))
+                    ctrl_vf = st.get("extrude_speed", st.get("v_f", None))
+                    if ctrl_vf is not None and ctrl_vf > 0:
+                        sample["v_f"] = ctrl_vf
 
                     sample["timing_total"] = st.get("timing_total", 0.0)
                     sample["pgd_iterations"] = st.get("pgd_iterations", 0)
@@ -590,6 +611,13 @@ class TemperatureDataCollector:
             f"  当前控制器: {ctype}\n"
             f"  数据目录: {self.data_dir}"
         )
+
+    cmd_TEMP_DATA_SET_PHASE_help = "手动设置数据采集的 Phase 标记"
+
+    def cmd_TEMP_DATA_SET_PHASE(self, gcmd):
+        phase = gcmd.get("PHASE", "heating")
+        self.current_phase = phase
+        gcmd.respond_info(f"数据采集 Phase 标记已更新为: '{phase}'")
 
     cmd_STEADY_STATE_CALIBRATE_help = "运行稳态阶梯响应校准实验"
 
