@@ -84,6 +84,8 @@ class TemperatureDataCollector:
         self.is_collecting = False
         self.collection_lock = threading.Lock()
         self.current_experiment = None
+        self.current_target_temp = None
+        self.current_extrude_speed = None
         self.current_phase = "heating"
         self.data_buffer = []
         self.sample_timer = None
@@ -192,33 +194,35 @@ class TemperatureDataCollector:
     def _build_control_params_summary(self, eventtime):
         """根据控制器类型构造参数摘要字符串"""
         ctrl = getattr(self.heater, "control", None)
-        if ctrl is None or not hasattr(ctrl, "get_status"):
+        if ctrl is None:
             return ""
         try:
-            st = ctrl.get_status(eventtime)
+            st = ctrl.get_status(eventtime) if hasattr(ctrl, "get_status") else {}
             if not isinstance(st, dict):
-                return ""
+                st = {}
+            prof = ctrl.get_profile() if hasattr(ctrl, "get_profile") else {}
+            if not isinstance(prof, dict):
+                prof = {}
+
             ctype = self._detect_control_type()
-            if ctype == "mpc_v2":
+            if ctype in ("mpc_v2", "mpc"):
+                np_val = st.get("prediction_horizon", prof.get("prediction_horizon", ""))
+                nc_val = st.get("control_horizon", prof.get("control_horizon", ""))
+                wt_val = st.get("weight_tracking", prof.get("weight_tracking", ""))
+                wr_val = st.get("weight_rate", prof.get("weight_rate", ""))
                 return (
-                    f"Np={st.get('prediction_horizon')},"
-                    f"Nc={st.get('control_horizon')},"
-                    f"wt={st.get('weight_tracking')},"
-                    f"wr={st.get('weight_rate')}"
+                    f"Np={np_val},"
+                    f"Nc={nc_val},"
+                    f"wt={wt_val},"
+                    f"wr={wr_val}"
                 )
-            if ctype == "mpc":
-                return (
-                    f"Np={st.get('prediction_horizon')},"
-                    f"Nc={st.get('control_horizon')},"
-                    f"wt={st.get('weight_tracking')},"
-                    f"wr={st.get('weight_rate')}"
-                )
-            if ctype == "pid":
-                return (
-                    f"Kp={st.get('Kp', 0)},"
-                    f"Ki={st.get('Ki', 0)},"
-                    f"Kd={st.get('Kd', 0)}"
-                )
+            elif "pid" in ctype or ctype == "unknown":
+                kp = st.get("Kp", getattr(ctrl, "Kp", prof.get("pid_kp", 0)))
+                ki = st.get("Ki", getattr(ctrl, "Ki", prof.get("pid_ki", 0)))
+                kd = st.get("Kd", getattr(ctrl, "Kd", prof.get("pid_kd", 0)))
+                return f"Kp={kp}," f"Ki={ki}," f"Kd={kd}"
+            else:
+                return f"type={ctype}"
         except Exception as e:
             logging.debug(f"构造控制器参数摘要失败: {e}")
         return ""
@@ -491,13 +495,15 @@ class TemperatureDataCollector:
 
     def cmd_TEMP_DATA_COLLECT(self, gcmd):
         """
-        TEMP_DATA_COLLECT [HEATER=<加热器>] [SAMPLE_RATE=<Hz>] [EXPERIMENT=<实验名>]
+        TEMP_DATA_COLLECT [HEATER=<加热器>] [SAMPLE_RATE=<Hz>] [EXPERIMENT=<实验名>] [TARGET=<目标温度>] [SPEED=<挤出速度>]
         """
         heater_name = gcmd.get("HEATER", "extruder")
         sample_rate = gcmd.get_float(
             "SAMPLE_RATE", self.default_sample_rate, above=0.0
         )
         experiment_name = gcmd.get("EXPERIMENT", "manual_collection")
+        target_temp = gcmd.get_float("TARGET", None)
+        extrude_speed = gcmd.get_float("SPEED", None)
 
         try:
             self.heater = self._get_heater(heater_name)
@@ -506,6 +512,8 @@ class TemperatureDataCollector:
             raise gcmd.error(f"未找到加热器 '{heater_name}': {e}")
 
         self.default_sample_rate = sample_rate
+        self.current_target_temp = target_temp
+        self.current_extrude_speed = extrude_speed
 
         ctype = self._detect_control_type()
         if self._start_collection(experiment_name):
@@ -518,7 +526,7 @@ class TemperatureDataCollector:
             gcmd.respond_info("数据采集已在进行中。")
 
     cmd_TEMP_DATA_STOP_help = (
-        "停止温度数据采集并保存到文件（文件名自动带控制器后缀）"
+        "停止温度数据采集并保存到文件（自动带有控制器、温度、速度后缀）"
     )
 
     def cmd_TEMP_DATA_STOP(self, gcmd):
@@ -526,7 +534,26 @@ class TemperatureDataCollector:
         TEMP_DATA_STOP [FILENAME=<文件名>]
         """
         ctype = self._detect_control_type()
-        default_name = f"temp_data_{ctype}_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+        exp = self.current_experiment or "manual"
+        ts = time.strftime("%Y%m%d_%H%M%S")
+
+        target_str = ""
+        if getattr(self, "current_target_temp", None) is not None:
+            t_val = self.current_target_temp
+            target_str = f"_{int(t_val)}C" if t_val == int(t_val) else f"_{t_val}C"
+
+        speed_str = ""
+        if getattr(self, "current_extrude_speed", None) is not None:
+            s_val = self.current_extrude_speed
+            speed_str = f"_{int(s_val)}mms" if s_val == int(s_val) else f"_{s_val}mms"
+
+        if exp == "step_response":
+            default_name = f"step_response_{ctype}{target_str}_{ts}.csv"
+        elif exp == "extrusion_disturbance":
+            default_name = f"extrusion_disturbance_{ctype}{target_str}{speed_str}_{ts}.csv"
+        else:
+            default_name = f"temp_data_{ctype}_{exp}{target_str}{speed_str}_{ts}.csv"
+
         filename = gcmd.get("FILENAME", default_name)
 
         self._stop_collection()
@@ -543,6 +570,8 @@ class TemperatureDataCollector:
         with self.collection_lock:
             self.data_buffer = []
             self.current_experiment = None
+            self.current_target_temp = None
+            self.current_extrude_speed = None
 
     cmd_TEMP_DATA_STATUS_help = "获取温度数据采集状态"
 

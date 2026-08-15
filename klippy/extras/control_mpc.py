@@ -1557,6 +1557,10 @@ class ControlMPC:
             "filament_temp": self.filament_temp_src,
             "filament_heat_capacity": self.const_filament_heat_capacity,
             "filament_density": self.const_filament_density,
+            "prediction_horizon": self.const_prediction_horizon,
+            "control_horizon": self.const_control_horizon,
+            "weight_tracking": self.const_weight_tracking,
+            "weight_rate": self.const_weight_rate,
         }
 
 
@@ -2118,6 +2122,7 @@ class ControlMPCV2:
 
         # 功率和损耗记录
         self.last_power_v2 = 0.0
+        self.last_extrude_speed_v2 = 0.0
         self.last_loss_ambient_v2 = 0.0
         self.last_loss_filament_v2 = 0.0
         self.last_loss_cold_v2 = 0.0
@@ -2851,6 +2856,7 @@ class ControlMPCV2:
                         -self.const_maximum_retract_v2, pos - pos_prev
                     )
                     extrude_speed = pos_moved / dt
+        self.last_extrude_speed_v2 = extrude_speed
 
         if self.want_ambient_refresh_v2 and self.ambient_sensor_v2 is not None:
             temp_amb = self.ambient_sensor_v2.get_temp(read_time)[0]
@@ -3178,6 +3184,8 @@ class ControlMPCV2:
             "temp_sensor": self.state_sensor_temp_v2,
             "temp_ambient": self.state_ambient_temp_v2,
             "temp_cold": self.state_cold_temp_v2,
+            "extrude_speed": self.last_extrude_speed_v2,
+            "v_f": self.last_extrude_speed_v2,
             "d_loss": self.state_d_loss_v2,
             "power": self.last_power_v2,
             "loss_ambient": self.last_loss_ambient_v2,
