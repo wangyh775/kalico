@@ -3768,6 +3768,10 @@ sensor_type: temperature_fusion
 #maximum_deviation:
 #   Maximum allowed difference between any two channels. Exceeding triggers
 #   shutdown (default: 999.0, effectively disabled).
+#ignore_modbus_errors: False
+#   If set to True, modbus communication read failures (timeouts, framing errors)
+#   will log warnings and keep the last known temperature instead of invoking
+#   printer shutdown.
 #gcode_id:
 #   Optional gcode ID for M105 reporting.
 ```

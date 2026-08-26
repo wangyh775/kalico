@@ -14,6 +14,7 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 
@@ -732,6 +733,10 @@ class PrinterSensorFusion:
             "max_temp", 99999999.9, above=self.min_temp
         )
         self.maximum_deviation = config.getfloat("maximum_deviation", 999.0)
+        self.ignore_modbus_errors = config.getboolean(
+            "ignore_modbus_errors", False
+        )
+        self._consecutive_read_errors = 0
 
         # G-code ID for M105
         self.gcode_id = config.get("gcode_id", None)
@@ -854,7 +859,29 @@ class PrinterSensorFusion:
                 self._bus.channel_count,
                 self._bus.func_code,
             )
+            self._consecutive_read_errors = 0
         except Exception as e:
+            if self.ignore_modbus_errors:
+                self._consecutive_read_errors += 1
+                if self._consecutive_read_errors <= 3 or (
+                    self._consecutive_read_errors % 30 == 0
+                ):
+                    logging.warning(
+                        "temperature_fusion[%s]: modbus read failed on "
+                        "bus '%s': %s (consecutive_errors=%d, keeping last temp %.2f)",
+                        self.name,
+                        self._bus.bus_name,
+                        e,
+                        self._consecutive_read_errors,
+                        self.last_temp,
+                    )
+                if self._callback is not None:
+                    mcu = self.printer.lookup_object("mcu")
+                    self._callback(
+                        mcu.estimated_print_time(eventtime), self.last_temp
+                    )
+                return eventtime + self.report_time
+
             self.printer.invoke_shutdown(
                 "temperature_fusion[%s]: modbus read failed on bus '%s': %s"
                 % (self.name, self._bus.bus_name, e)
