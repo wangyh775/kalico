@@ -265,6 +265,7 @@ class ModbusBus:
 
     def __init__(self, config, bus_name):
         self.printer = config.get_printer()
+        self.reactor = self.printer.get_reactor()
         self.bus_name = bus_name
 
         # serial / transport
