@@ -53,8 +53,8 @@ import threading
 
 from .danger_options import get_danger_options
 
-REPORT_TIME = 1.0
-MIN_REPORT_TIME = 0.3
+REPORT_TIME = 0.3
+MIN_REPORT_TIME = 0.1
 DEFAULT_BUS_NAME = "default"
 MANAGER_OBJECT_NAME = "modbus_temperature_manager"
 FACTORY_LOADER_SECTION = "modbus_temperature factory"
@@ -307,7 +307,8 @@ class ModbusBus:
         self.disconnected_raw = config.getint(
             "disconnected_raw", SENSOR_DISCONNECTED_RAW
         )
-        self.timeout = config.getfloat("timeout", 0.2, above=0.0)
+        default_timeout = 0.3 if self.baudrate <= 9600 else 0.2
+        self.timeout = config.getfloat("timeout", default_timeout, above=0.0)
 
         # Identifies a unique physical bus. Used for port sharing.
         self.bus_key = (
@@ -325,6 +326,76 @@ class ModbusBus:
         self.is_debug = (
             self.printer.get_start_args().get("debugoutput") is not None
         )
+
+        # Centralized sampling & sensor subscriber registry
+        self.sensors = []
+        self._consecutive_errors = 0
+        self.last_regs = None
+        self.sample_timer = self.reactor.register_timer(self._sample_bus)
+        self.printer.register_event_handler(
+            "klippy:connect", self._handle_connect
+        )
+
+    def register_sensor(self, sensor):
+        self.sensors.append(sensor)
+
+    def _handle_connect(self):
+        self.reactor.update_timer(self.sample_timer, self.reactor.NOW)
+
+    def _log_read_error(self, msg):
+        if self._consecutive_errors in (1, MAX_CONSECUTIVE_ERRORS):
+            logging.warning(
+                "modbus_temperature: read error on bus '%s': %s",
+                self.bus_name,
+                msg,
+            )
+        else:
+            logging.info(
+                "modbus_temperature: read error on bus '%s': %s",
+                self.bus_name,
+                msg,
+            )
+
+    def _sample_bus(self, eventtime):
+        mcu = self.printer.lookup_object("mcu")
+        now = self.reactor.monotonic()
+        print_time = mcu.estimated_print_time(now)
+
+        if self.is_debug:
+            for s in self.sensors:
+                s.update_from_bus(eventtime, print_time, None, debug=True)
+            return eventtime + self.report_time
+
+        try:
+            serial = self.open_serial()
+            regs = serial.read_registers(
+                self.slave_id,
+                self.register_start,
+                self.channel_count,
+                self.func_code,
+            )
+        except Exception as e:
+            self._consecutive_errors += 1
+            next_time = self.report_time
+            if self._consecutive_errors > MAX_CONSECUTIVE_ERRORS:
+                next_time = self.report_time + BACKOFF_STEP
+            self._log_read_error(str(e))
+            for s in self.sensors:
+                s.update_from_bus(
+                    eventtime,
+                    print_time,
+                    None,
+                    error=e,
+                    consecutive_errors=self._consecutive_errors,
+                )
+            return eventtime + next_time
+
+        # Happy path
+        self._consecutive_errors = 0
+        self.last_regs = regs
+        for s in self.sensors:
+            s.update_from_bus(eventtime, print_time, regs)
+        return eventtime + self.report_time
 
     def open_serial(self):
         registry = _serial_registry_for(self.printer)
@@ -380,46 +451,17 @@ class ModbusTemperatureSensor:
         # Per-sensor overrides (optional — fall back to the bus defaults)
         self.data_scale = config.getfloat("scale", bus.data_scale)
         self.signed = config.getboolean("signed", bus.signed)
-        self.func_code = config.getint(
-            "func_code",
-            bus.func_code,
-            minval=1,
-            maxval=0x7F,
-        )
-        self.register_start = config.getint(
-            "register_start",
-            bus.register_start,
-            minval=0,
-            maxval=0xFFFF,
-        )
-        self.channel_count = bus.channel_count
-        self.slave_id = bus.slave_id
-        self.report_time = config.getfloat(
-            "report_time",
-            bus.report_time,
-            minval=MIN_REPORT_TIME,
-        )
+        self.report_time = bus.report_time
         self.disconnected_raw = config.getint(
             "disconnected_raw", bus.disconnected_raw
         )
-        if self.func_code not in READ_FUNCS:
-            raise config.error(
-                "modbus_temperature: per-sensor func_code must be 3 or 4"
-            )
-        self._is_debug = bus.is_debug
-        self._bus_key = bus.bus_key
 
         # Runtime state
         self.temp = self.min_temp = self.max_temp = 0.0
-        self._consecutive_errors = 0
         self._disconnected_logged = False
 
-        self.sample_timer = self.reactor.register_timer(
-            self._sample_temperature
-        )
-        self.printer.register_event_handler(
-            "klippy:connect", self._handle_connect
-        )
+        # Register with bus for centralized sampling & dispatch
+        bus.register_sensor(self)
 
     # helpers ------------------------------------------------------------
 
@@ -431,9 +473,6 @@ class ModbusTemperatureSensor:
                 "[modbus_temperature] section to your config."
             )
         return manager.get_bus(bus_name, config)
-
-    def _handle_connect(self):
-        self.reactor.update_timer(self.sample_timer, self.reactor.NOW)
 
     # Heater protocol ----------------------------------------------------
 
@@ -447,63 +486,33 @@ class ModbusTemperatureSensor:
     def get_report_time_delta(self):
         return self.report_time
 
-    # sampling -----------------------------------------------------------
+    # sampling / dispatch from bus ---------------------------------------
 
-    def _log_read_error(self, msg):
-        # First few failures are visible at info level so users
-        # see what's happening; after several consecutive failures we
-        # throttle the log by downgrading repeated entries to
-        # debug-level and bump report_time.
-        if self._consecutive_errors in (1, MAX_CONSECUTIVE_ERRORS):
-            logging.warning(
-                "modbus_temperature: read error on channel %d of bus '%s': %s",
-                self.channel,
-                self._bus.bus_name,
-                msg,
-            )
-        else:
-            logging.info(
-                "modbus_temperature: read error on channel %d of bus '%s': %s",
-                self.channel,
-                self._bus.bus_name,
-                msg,
-            )
-
-    def _sample_temperature(self, eventtime):
-        if self._is_debug:
+    def update_from_bus(
+        self,
+        eventtime,
+        print_time,
+        regs,
+        error=None,
+        consecutive_errors=0,
+        debug=False,
+    ):
+        if debug:
             self.temp = 0.0
             if self._callback is not None:
-                mcu = self.printer.lookup_object("mcu")
-                now = self.reactor.monotonic()
-                self._callback(mcu.estimated_print_time(now), self.temp)
-            return eventtime + self.report_time
+                self._callback(print_time, self.temp)
+            return
 
-        try:
-            serial = self._bus.open_serial()
-            regs = serial.read_registers(
-                self.slave_id,
-                self.register_start,
-                self.channel_count,
-                self.func_code,
-            )
-        except Exception as e:
-            self._consecutive_errors += 1
-            next_time = self.report_time
-            if self._consecutive_errors > MAX_CONSECUTIVE_ERRORS:
-                next_time = self.report_time + BACKOFF_STEP
-            self._log_read_error(str(e))
+        if error is not None:
+            # Keep last temp on transient error to feed MCU watchdog PWM
             if (
-                self._consecutive_errors <= MAX_CONSECUTIVE_ERRORS
+                consecutive_errors <= MAX_CONSECUTIVE_ERRORS
                 and self.temp != 0.0
                 and self._callback is not None
             ):
-                mcu = self.printer.lookup_object("mcu")
-                now = self.reactor.monotonic()
-                self._callback(mcu.estimated_print_time(now), self.temp)
-            return eventtime + next_time
+                self._callback(print_time, self.temp)
+            return
 
-        # Happy path
-        self._consecutive_errors = 0
         raw = regs[self.channel]
 
         # Detect disconnected sensor (SHZK modules return 3000 = 300.0 °C
@@ -521,10 +530,8 @@ class ModbusTemperatureSensor:
                 )
                 self._disconnected_logged = True
             if self._callback is not None:
-                mcu = self.printer.lookup_object("mcu")
-                now = self.reactor.monotonic()
-                self._callback(mcu.estimated_print_time(now), self.temp)
-            return now + self.report_time
+                self._callback(print_time, self.temp)
+            return
         self._disconnected_logged = False
 
         if self.signed and raw & 0x8000:
@@ -540,10 +547,7 @@ class ModbusTemperatureSensor:
             )
 
         if self._callback is not None:
-            mcu = self.printer.lookup_object("mcu")
-            now = self.reactor.monotonic()
-            self._callback(mcu.estimated_print_time(now), self.temp)
-        return now + self.report_time
+            self._callback(print_time, self.temp)
 
     def get_status(self, eventtime):
         return {"temperature": round(self.temp, 2)}
