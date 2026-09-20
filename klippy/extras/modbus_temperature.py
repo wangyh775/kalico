@@ -86,6 +86,7 @@ BUS_CONFIG_KEYS = frozenset(
         "parity",
         "stopbits",
         "disconnected_raw",
+        "timeout",
     }
 )
 
@@ -114,7 +115,13 @@ class ModbusSerial:
     _SerialRegistry when their bus parameters match."""
 
     def __init__(
-        self, serial_path, baudrate, bytesize=8, parity="N", stopbits=1
+        self,
+        serial_path,
+        baudrate,
+        bytesize=8,
+        parity="N",
+        stopbits=1,
+        timeout=0.2,
     ):
         import serial
 
@@ -125,7 +132,7 @@ class ModbusSerial:
             bytesize=bytesize,
             parity=parity,
             stopbits=stopbits,
-            timeout=1.0,
+            timeout=timeout,
         )
         self._lock = threading.Lock()
 
@@ -300,6 +307,7 @@ class ModbusBus:
         self.disconnected_raw = config.getint(
             "disconnected_raw", SENSOR_DISCONNECTED_RAW
         )
+        self.timeout = config.getfloat("timeout", 0.2, above=0.0)
 
         # Identifies a unique physical bus. Used for port sharing.
         self.bus_key = (
@@ -309,6 +317,7 @@ class ModbusBus:
             self.parity,
             self.stopbits,
             self.slave_id,
+            self.timeout,
         )
 
         # Debug path: avoid any hardware access when klippy is invoked
@@ -327,6 +336,7 @@ class ModbusBus:
                 self.bytesize,
                 self.parity,
                 self.stopbits,
+                self.timeout,
             )
 
         return registry.get_or_open(self.bus_key, _build)
@@ -482,6 +492,14 @@ class ModbusTemperatureSensor:
             if self._consecutive_errors > MAX_CONSECUTIVE_ERRORS:
                 next_time = self.report_time + BACKOFF_STEP
             self._log_read_error(str(e))
+            if (
+                self._consecutive_errors <= MAX_CONSECUTIVE_ERRORS
+                and self.temp != 0.0
+                and self._callback is not None
+            ):
+                mcu = self.printer.lookup_object("mcu")
+                now = self.reactor.monotonic()
+                self._callback(mcu.estimated_print_time(now), self.temp)
             return eventtime + next_time
 
         # Happy path
