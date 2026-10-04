@@ -6,7 +6,7 @@
 from klippy.configfile import ConfigWrapper
 from klippy.printer import Printer, SubsystemComponentCollection
 
-from . import ads131m0x, ads1220, alps_serial, hx71x
+from . import ads131m0x, ads1220, cs1237, hx71x,alps_serial
 from .load_cell import LoadCell
 
 
@@ -17,6 +17,7 @@ def register_components(subsystem: SubsystemComponentCollection):
         | ads1220.ADS1220_SENSOR_TYPE
         | ads131m0x.ADS131M0X_SENSOR_TYPES
         | alps_serial.ALPS_SENSOR_TYPE
+        | cs1237.CS1237_SENSOR_TYPE
     )
     for name, sensor in sensors.items():
         subsystem.register_component("load_cell_sensors", name, sensor)
