@@ -170,6 +170,14 @@ The following information is available in the
 - `excluded_objects`: An array of strings listing the names of excluded objects.
 - `current_object`: The name of the object currently being printed.
 
+## extruder
+
+The following information is available for
+[extruder](Config_Reference.md#extruder) objects, in addition to the
+[heater](#heater) and [extruder_stepper](#extruder_stepper) fields:
+- `nozzle_diameter`: The current nozzle diameter, as set in the config or
+  by [SET_NOZZLE_DIAMETER](G-Codes.md#set_nozzle_diameter).
+
 ## extruder_stepper
 
 The following information is available for extruder_stepper objects (as well as
@@ -365,8 +373,11 @@ The following information is available for each `[load_cell name]`:
 - 'is_calibrated': True/False is the load cell calibrated
 - 'counts_per_gram': The number of raw sensor counts that equals 1 gram of force
 - 'reference_tare_counts': The reference number of raw sensor counts for 0 force
+- 'reference_tare_counts_per_channel': The reference number of raw sensor counts for 0 force as an array, one entry per channel
 - 'tare_counts': The current number of raw sensor counts for 0 force
+- 'tare_counts_per_channel': The current number of raw sensor counts for 0 force as an array, one entry per channel
 - 'force_g': The force in grams, averaged over the last polling period.
+- 'force_g_per_channel': The force in grams, averaged over the last polling period, one entry per channel
 - 'min_force_g': The minimum force in grams, over the last polling period.
 - 'max_force_g': The maximum force in grams, over the last polling period.
 
